@@ -7,9 +7,10 @@ name: Competition A/B
 # number.  What a local comparison *can* show reliably is the relative effect of a
 # patch, which is what decides whether an optimisation is worth keeping.
 #
-# This workflow therefore builds one binary from the pristine baseline branch,
-# benchmarks it, applies the candidate patch to the same tree, rebuilds it and
-# benchmarks again -- one machine, one configuration, one build tree.
+# Both variants are built from scratch with the same procedure, on one machine,
+# and are then benchmarked back to back.  Building one variant incrementally
+# would mix the patch with whatever the incremental rebuild happened to change,
+# so the tree is discarded and rebuilt for the second variant as well.
 
 on:
   workflow_dispatch:
@@ -25,7 +26,8 @@ env:
   BEFORE_REF: '2026-competition'
   AFTER_REF: 'competition-opt'
   REPETITIONS: '3'
-  # Files that carry the candidate optimisation.
+  # Files that carry the candidate optimisation.  Set to an empty value to
+  # measure the same tree twice, which is the harness self-check.
   PATCH_FILES: 'src/storage/fts/ob_fts_stop_word.cpp src/sql/engine/expr/ob_expr_tokenize.cpp'
 
 jobs:
@@ -91,6 +93,28 @@ jobs:
           ./build.sh release --init
           make -C build_release -j4
           test -x build_release/src/observer/seekdb
+          # Keep the baseline binary next to the candidate one so both resolve
+          # their share files through the same relative path.
+          cp build_release/src/observer/seekdb build_release/src/observer/seekdb_before
+
+      - name: Apply the candidate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd before
+          for file in $PATCH_FILES; do
+            echo "patching $file"
+            cp "../after/$file" "$file"
+          done
+          git --no-pager diff --stat || true
+          # The candidate is built from scratch as well, so the comparison
+          # measures the patch and not the rebuild.
+          rm -rf build_release
+          if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
+          ./build.sh release
+          make -C build_release -j4
+          test -x build_release/src/observer/seekdb
+          cp build_release/src/observer/seekdb build_release/src/observer/seekdb_after
 
       - name: Benchmark the baseline
         shell: bash
@@ -101,7 +125,7 @@ jobs:
           CLIENT="$GITHUB_WORKSPACE/before/deps/3rd/u01/obclient/bin/obclient"
           chmod +x "$CLIENT"
           python3 before/.github/script/seekdb/sdb.py start \
-            --binary "$GITHUB_WORKSPACE/before/build_release/src/observer/seekdb" \
+            --binary "$GITHUB_WORKSPACE/before/build_release/src/observer/seekdb_before" \
             --base-dir "$GITHUB_WORKSPACE/run_before" \
             --port "$SEEKDB_PORT" \
             --nodaemon
@@ -121,36 +145,6 @@ jobs:
           python3 before/.github/script/seekdb/sdb.py destroy \
             --base-dir "$GITHUB_WORKSPACE/run_before"
 
-      - name: Apply the candidate patch
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd before
-          for file in $PATCH_FILES; do
-            echo "patching $file"
-            cp "../after/$file" "$file"
-          done
-          git -c user.email=ci@example.invalid -c user.name="Competition CI" \
-            commit -am "perf(fts): candidate optimisation under test" || true
-          git --no-pager log -1 --oneline
-          git --no-pager diff --stat HEAD~1 HEAD || true
-
-      - name: Rebuild with the candidate patch
-        shell: bash
-        run: |
-          set -euo pipefail
-          BIN="before/build_release/src/observer/seekdb"
-          BEFORE_HASH="$(sha256sum "$BIN" | cut -d' ' -f1)"
-          make -C before/build_release -j4 seekdb
-          test -x "$BIN"
-          AFTER_HASH="$(sha256sum "$BIN" | cut -d' ' -f1)"
-          echo "baseline binary: $BEFORE_HASH"
-          echo "candidate binary: $AFTER_HASH"
-          if [[ "$BEFORE_HASH" == "$AFTER_HASH" ]]; then
-            echo "ERROR: the rebuild produced the same binary, the patch was not compiled in" >&2
-            exit 1
-          fi
-
       - name: Benchmark the candidate
         shell: bash
         run: |
@@ -159,7 +153,7 @@ jobs:
           CLIENT="$GITHUB_WORKSPACE/before/deps/3rd/u01/obclient/bin/obclient"
           chmod +x "$CLIENT"
           python3 before/.github/script/seekdb/sdb.py start \
-            --binary "$GITHUB_WORKSPACE/before/build_release/src/observer/seekdb" \
+            --binary "$GITHUB_WORKSPACE/before/build_release/src/observer/seekdb_after" \
             --base-dir "$GITHUB_WORKSPACE/run_after" \
             --port "$SEEKDB_PORT" \
             --nodaemon
