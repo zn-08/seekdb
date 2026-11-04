@@ -1,0 +1,212 @@
+name: Competition A/B
+
+# Same-runner A/B harness for the full-text index tuning challenge.
+#
+# The challenge scores a submission against a fixed baseline that was captured on
+# the VLDB CI machine, so a GitHub-hosted runner can never reproduce the official
+# number.  What a local comparison *can* show reliably is the relative effect of a
+# patch, which is what decides whether an optimisation is worth keeping.
+#
+# This workflow therefore builds one binary from the pristine baseline branch,
+# benchmarks it, applies the candidate patch to the same tree, rebuilds it and
+# benchmarks again -- one machine, one configuration, one build tree.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - competition-ab
+
+permissions:
+  contents: read
+
+env:
+  SEEKDB_PORT: '2881'
+  BEFORE_REF: '2026-competition'
+  AFTER_REF: 'competition-opt'
+  REPETITIONS: '3'
+  # Files that carry the candidate optimisation.
+  PATCH_FILES: 'src/storage/fts/ob_fts_stop_word.cpp src/sql/engine/expr/ob_expr_tokenize.cpp'
+
+jobs:
+  fts-ab:
+    name: before / after on one runner
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Free Disk Space
+        uses: insightsengineering/disk-space-reclaimer@v1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+          docker-images: true
+          tools-cache: false
+
+      - name: Check out the A/B harness
+        uses: actions/checkout@v4
+        with:
+          path: harness
+          fetch-depth: 1
+
+      - name: Check out the baseline branch
+        uses: actions/checkout@v4
+        with:
+          path: before
+          ref: ${{ env.BEFORE_REF }}
+          fetch-depth: 1
+
+      - name: Check out the candidate branch
+        uses: actions/checkout@v4
+        with:
+          path: after
+          ref: ${{ env.AFTER_REF }}
+          fetch-depth: 1
+
+      - name: Install build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git wget rpm rpm2cpio cpio make build-essential binutils m4 \
+            libtool-bin libncurses5 python3 python3-pip \
+            libncurses-dev libaio-dev libaio1 libtool-bin
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          key: ${{ runner.os }}-build-competition-ab-el9.x86_64-${{ hashFiles('before/deps/init/oceanbase.el9.x86_64.deps') }}
+          path: before/deps/3rd
+
+      - name: Build the baseline binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
+          cd before
+          ./build.sh release --init
+          make -C build_release -j4
+          test -x build_release/src/observer/seekdb
+
+      - name: Benchmark the baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/reports"
+          chmod +x before/.github/script/seekdb/*.py
+          CLIENT="$GITHUB_WORKSPACE/before/deps/3rd/u01/obclient/bin/obclient"
+          chmod +x "$CLIENT"
+          python3 before/.github/script/seekdb/sdb.py start \
+            --binary "$GITHUB_WORKSPACE/before/build_release/src/observer/seekdb" \
+            --base-dir "$GITHUB_WORKSPACE/run_before" \
+            --port "$SEEKDB_PORT" \
+            --nodaemon
+          python3 before/.github/script/seekdb/sdb.py wait-ready \
+            --client "$CLIENT" \
+            --base-dir "$GITHUB_WORKSPACE/run_before" \
+            --host 127.0.0.1 \
+            --port "$SEEKDB_PORT" \
+            --user root
+          export MYSQL="$CLIENT -h127.0.0.1 -P$SEEKDB_PORT -uroot -N -s --default-character-set=utf8mb4"
+          export MYSQL_VERBOSE="$CLIENT -h127.0.0.1 -P$SEEKDB_PORT -uroot --default-character-set=utf8mb4"
+          for rep in $(seq 1 "$REPETITIONS"); do
+            export OUTPUT="$GITHUB_WORKSPACE/reports/before_${rep}.txt"
+            export LABEL="before"
+            (cd before && bash tools/benchmark/fts_large_bench.sh)
+          done
+          python3 before/.github/script/seekdb/sdb.py destroy \
+            --base-dir "$GITHUB_WORKSPACE/run_before"
+
+      - name: Apply the candidate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd before
+          for file in $PATCH_FILES; do
+            echo "patching $file"
+            cp "../after/$file" "$file"
+          done
+          git -c user.email=ci@example.invalid -c user.name="Competition CI" \
+            commit -am "perf(fts): candidate optimisation under test" || true
+          git --no-pager log -1 --oneline
+          git --no-pager diff --stat HEAD~1 HEAD || true
+
+      - name: Rebuild with the candidate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="before/build_release/src/observer/seekdb"
+          BEFORE_HASH="$(sha256sum "$BIN" | cut -d' ' -f1)"
+          make -C before/build_release -j4 seekdb
+          test -x "$BIN"
+          AFTER_HASH="$(sha256sum "$BIN" | cut -d' ' -f1)"
+          echo "baseline binary: $BEFORE_HASH"
+          echo "candidate binary: $AFTER_HASH"
+          if [[ "$BEFORE_HASH" == "$AFTER_HASH" ]]; then
+            echo "ERROR: the rebuild produced the same binary, the patch was not compiled in" >&2
+            exit 1
+          fi
+
+      - name: Benchmark the candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x before/.github/script/seekdb/*.py
+          CLIENT="$GITHUB_WORKSPACE/before/deps/3rd/u01/obclient/bin/obclient"
+          chmod +x "$CLIENT"
+          python3 before/.github/script/seekdb/sdb.py start \
+            --binary "$GITHUB_WORKSPACE/before/build_release/src/observer/seekdb" \
+            --base-dir "$GITHUB_WORKSPACE/run_after" \
+            --port "$SEEKDB_PORT" \
+            --nodaemon
+          python3 before/.github/script/seekdb/sdb.py wait-ready \
+            --client "$CLIENT" \
+            --base-dir "$GITHUB_WORKSPACE/run_after" \
+            --host 127.0.0.1 \
+            --port "$SEEKDB_PORT" \
+            --user root
+          export MYSQL="$CLIENT -h127.0.0.1 -P$SEEKDB_PORT -uroot -N -s --default-character-set=utf8mb4"
+          export MYSQL_VERBOSE="$CLIENT -h127.0.0.1 -P$SEEKDB_PORT -uroot --default-character-set=utf8mb4"
+          for rep in $(seq 1 "$REPETITIONS"); do
+            export OUTPUT="$GITHUB_WORKSPACE/reports/after_${rep}.txt"
+            export LABEL="after"
+            (cd before && bash tools/benchmark/fts_large_bench.sh)
+          done
+          python3 before/.github/script/seekdb/sdb.py destroy \
+            --base-dir "$GITHUB_WORKSPACE/run_after"
+
+      - name: Score both reports against the fixed baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd before
+          for rep in $(seq 1 "$REPETITIONS"); do
+            python3 tools/benchmark/fts_large_bench_score.py \
+              "$GITHUB_WORKSPACE/reports/before_${rep}.txt" --json \
+              > "$GITHUB_WORKSPACE/reports/score_before_${rep}.json"
+            python3 tools/benchmark/fts_large_bench_score.py \
+              "$GITHUB_WORKSPACE/reports/after_${rep}.txt" --json \
+              > "$GITHUB_WORKSPACE/reports/score_after_${rep}.json"
+          done
+
+      - name: Compare before and after
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 harness/tools/benchmark/fts_ab_compare.py \
+            --before "$GITHUB_WORKSPACE"/reports/before_*.txt \
+            --after "$GITHUB_WORKSPACE"/reports/after_*.txt \
+            --baseline before/tools/benchmark/fts_large_bench_baseline.json \
+            --json "$GITHUB_WORKSPACE/reports/fts_ab_compare.json" \
+            | tee "$GITHUB_WORKSPACE/reports/fts_ab_compare.txt"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fts-ab-report
+          path: reports/
