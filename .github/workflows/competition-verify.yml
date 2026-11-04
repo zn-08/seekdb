@@ -9,8 +9,6 @@ name: Competition Verify
 on:
   workflow_dispatch:
   push:
-    branches:
-      - 'feat/competition-2026'
 
 permissions:
   contents: read
