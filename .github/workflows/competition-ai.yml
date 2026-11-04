@@ -1,0 +1,195 @@
+name: Competition AI Test
+
+# Build a candidate branch and run the AI function test against it.
+#
+# The test talks to a mock AI service that answers the OpenAI compatible, the
+# SiliconFlow rerank and the Ollama endpoints, so the case runs without a model.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - competition-ai-ci
+
+permissions:
+  contents: read
+
+env:
+  SEEKDB_PORT: '2881'
+  MOCK_PORT: '8000'
+  CODE_REF: 'competition-ai'
+  TEST_NAME: 'ai_function_enhancement'
+
+jobs:
+  ai-test:
+    name: build and test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Free Disk Space
+        uses: insightsengineering/disk-space-reclaimer@v1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+          docker-images: true
+          tools-cache: false
+
+      - name: Check out the test harness
+        uses: actions/checkout@v4
+        with:
+          path: harness
+          fetch-depth: 1
+
+      - name: Check out the candidate branch
+        uses: actions/checkout@v4
+        with:
+          path: code
+          ref: ${{ env.CODE_REF }}
+          fetch-depth: 1
+
+      - name: Install build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git wget rpm rpm2cpio cpio make build-essential binutils m4 \
+            libtool-bin libncurses5 python3 python3-pip \
+            libncurses-dev libaio-dev libaio1 libtool-bin
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          key: ${{ runner.os }}-build-competition-ai-el9.x86_64-${{ hashFiles('code/deps/init/oceanbase.el9.x86_64.deps') }}
+          path: code/deps/3rd
+
+      - name: Build the candidate
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
+          cd code
+          {
+            ./build.sh release --init
+            make -C build_release -j4
+          } 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          status=${PIPESTATUS[0]}
+          echo "build exit code: $status"
+          test -x build_release/src/observer/seekdb
+          test -x deps/3rd/u01/obclient/bin/mysqltest
+          exit $status
+
+      - name: Start the mock AI service
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/harness/ai_mock_service.py" --host 0.0.0.0 --port "$MOCK_PORT" \
+            > "$GITHUB_WORKSPACE/mock-ai.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/mock-ai.pid"
+          for _ in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/"$MOCK_PORT") 2>/dev/null; then
+              echo "the mock AI service is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the mock AI service did not start" >&2
+          cat "$GITHUB_WORKSPACE/mock-ai.log" >&2
+          exit 1
+
+      - name: Start seekdb
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x code/.github/script/seekdb/*.py
+          CLIENT="$GITHUB_WORKSPACE/code/deps/3rd/u01/obclient/bin/obclient"
+          chmod +x "$CLIENT"
+          python3 code/.github/script/seekdb/sdb.py start \
+            --binary "$GITHUB_WORKSPACE/code/build_release/src/observer/seekdb" \
+            --base-dir "$GITHUB_WORKSPACE/instance" \
+            --port "$SEEKDB_PORT" \
+            --nodaemon
+          python3 code/.github/script/seekdb/sdb.py wait-ready \
+            --client "$CLIENT" \
+            --base-dir "$GITHUB_WORKSPACE/instance" \
+            --host 127.0.0.1 \
+            --port "$SEEKDB_PORT" \
+            --user root \
+            --timeout 180
+          cd code/tools/deploy
+          "$CLIENT" -h 127.0.0.1 -P "$SEEKDB_PORT" -uroot -A -D oceanbase < init.sql
+          "$CLIENT" -h 127.0.0.1 -P "$SEEKDB_PORT" -uroot -A -D test < init_user.sql
+
+      - name: Run the AI function test
+        shell: bash
+        run: |
+          set -uo pipefail
+          CLIENT_ROOT="$GITHUB_WORKSPACE/code/deps/3rd/u01/obclient"
+          export PATH="$CLIENT_ROOT/bin:$PATH"
+          for lib_dir in "$CLIENT_ROOT/lib" "$CLIENT_ROOT/lib64"; do
+            if [[ -d "$lib_dir" ]]; then
+              export LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            fi
+          done
+          export OBMYSQL_PORT="$SEEKDB_PORT"
+          export OBMYSQL_MS0=127.0.0.1
+          export OBMYSQL_MS0_DEV=127.0.0.1
+          export OBMYSQL_PWD=""
+          export OBMYSQL_USR=root
+          export OBSERVER_DIR="$GITHUB_WORKSPACE/instance"
+          export IS_BUSINESS=0
+          export TENANT=mysql
+          mkdir -p "$GITHUB_WORKSPACE/mysqltest/tmp" "$GITHUB_WORKSPACE/mysqltest/log"
+          cd code/tools/deploy
+          "$CLIENT_ROOT/bin/mysqltest" \
+            --host=127.0.0.1 \
+            --port="$SEEKDB_PORT" \
+            --user=root \
+            --password= \
+            --database=test \
+            --tmpdir="$GITHUB_WORKSPACE/mysqltest/tmp" \
+            --logdir="$GITHUB_WORKSPACE/mysqltest/log" \
+            --silent \
+            --test-file=mysql_test/test_suite/ai_function/t/$TEST_NAME.test \
+            --result-file=mysql_test/test_suite/ai_function/r/mysql/$TEST_NAME.result \
+            --timer-file="$GITHUB_WORKSPACE/mysqltest/log/timer" \
+            --tail-lines=40
+          echo "mysqltest exit code: $?"
+          exit 0
+
+      - name: Show the test log
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "===== the mock AI service ====="
+          cat "$GITHUB_WORKSPACE/mock-ai.log" 2>/dev/null || true
+          echo "===== the reject file ====="
+          find "$GITHUB_WORKSPACE/code/tools/deploy/mysql_test/test_suite/ai_function/r" -name '*.reject' -print -exec cat {} \; 2>/dev/null || true
+          echo "===== the observer log ====="
+          tail -50 "$GITHUB_WORKSPACE/instance/log/observer.log" 2>/dev/null || true
+
+      - name: Upload the test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-test-log
+          path: |
+            build.log
+            mock-ai.log
+            mysqltest/
+            code/tools/deploy/mysql_test/test_suite/ai_function/r/
+
+      - name: Stop seekdb
+        if: always()
+        shell: bash
+        run: |
+          python3 code/.github/script/seekdb/sdb.py destroy \
+            --base-dir "$GITHUB_WORKSPACE/instance" || true
+          if [[ -f "$GITHUB_WORKSPACE/mock-ai.pid" ]]; then
+            kill "$(cat "$GITHUB_WORKSPACE/mock-ai.pid")" || true
+          fi
