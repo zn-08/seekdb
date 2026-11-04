@@ -1,0 +1,127 @@
+name: Competition Verify
+
+# Build the competition branch on a Linux runner and measure the full-text
+# benchmark that the "full-text index tuning" challenge scores against.
+#
+# The checked-out ref is the branch that will be submitted, so the numbers in
+# the uploaded report belong to exactly the code that is handed to the judge.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'feat/competition-2026'
+
+permissions:
+  contents: read
+
+env:
+  SUBMISSION_REF: '2026-competition'
+  SEEKDB_PORT: '2881'
+
+jobs:
+  fts-benchmark:
+    name: build and benchmark
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - name: Free Disk Space
+        uses: insightsengineering/disk-space-reclaimer@v1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+          docker-images: true
+          tools-cache: false
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SUBMISSION_REF }}
+          fetch-depth: 1
+
+      - name: Install build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git wget rpm rpm2cpio cpio make build-essential binutils m4 \
+            libtool-bin libncurses5 python3 python3-pip \
+            libncurses-dev libaio-dev libaio1 libtool-bin
+
+      - name: Cache dependencies
+        id: cache-deps
+        uses: actions/cache@v4
+        env:
+          cache-name: cache-deps
+        with:
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-el9.x86_64-${{ hashFiles('deps/init/oceanbase.el9.x86_64.deps') }}
+          path: deps/3rd
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
+          ./build.sh release --init
+          cd build_release
+          make -j4
+          test -x src/observer/seekdb
+
+      - name: Start seekdb
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x .github/script/seekdb/*.py
+          python3 .github/script/seekdb/sdb.py start \
+            --binary "$GITHUB_WORKSPACE/build_release/src/observer/seekdb" \
+            --base-dir "$GITHUB_WORKSPACE/seekdb_run" \
+            --port "$SEEKDB_PORT" \
+            --nodaemon
+          python3 .github/script/seekdb/sdb.py wait-ready \
+            --client "$GITHUB_WORKSPACE/deps/3rd/u01/obclient/bin/obclient" \
+            --base-dir "$GITHUB_WORKSPACE/seekdb_run" \
+            --host 127.0.0.1 \
+            --port "$SEEKDB_PORT" \
+            --user root
+
+      - name: Run full-text benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          CLIENT="$GITHUB_WORKSPACE/deps/3rd/u01/obclient/bin/obclient"
+          chmod +x "$CLIENT"
+          export MYSQL="$CLIENT -h127.0.0.1 -P$SEEKDB_PORT -uroot -N -s --default-character-set=utf8mb4"
+          export MYSQL_VERBOSE="$CLIENT -h127.0.0.1 -P$SEEKDB_PORT -uroot --default-character-set=utf8mb4"
+          export OUTPUT="$GITHUB_WORKSPACE/fts_bench_report.txt"
+          export LABEL="${LABEL:-ci}"
+          ROWS="${ROWS:-20000}"
+          export ROWS
+          bash tools/benchmark/fts_large_bench.sh
+          echo "----- report -----"
+          cat "$OUTPUT"
+
+      - name: Score the report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/benchmark/fts_large_bench_score.py \
+            fts_bench_report.txt --json | tee fts_bench_score.json
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: fts-benchmark-report
+          path: |
+            fts_bench_report.txt
+            fts_bench_score.json
+
+      - name: Stop seekdb
+        if: always()
+        shell: bash
+        run: |
+          python3 .github/script/seekdb/sdb.py destroy \
+            --base-dir "$GITHUB_WORKSPACE/seekdb_run" || true
