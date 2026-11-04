@@ -142,6 +142,15 @@ jobs:
             export LABEL="before"
             (cd before && bash tools/benchmark/fts_large_bench.sh)
           done
+          # The rows of a limited query and the tokens of the tokenizer are the
+          # observable behaviour of the change, so they are captured as well.
+          "$CLIENT" -h 127.0.0.1 -P"$SEEKDB_PORT" -uroot -N -s --default-character-set=utf8mb4 \
+            -D fts_large_bench -e "
+          select id from docs where MATCH(content) AGAINST('倒排索引 tokenizer') limit 20;
+          select count(*) from docs where MATCH(title, content) AGAINST('全文索引 分词器');
+          select tokenize('OceanBase 是一席非常稳定的数据库，全文索引的分词器热点包括解析器实例复用与停用词全局单例', 'ik');
+          select tokenize('The quick brown fox jumps over the lazy dog. Full-text search indexing requires efficient tokenization.', 'beng');
+          " > "$GITHUB_WORKSPACE/reports/probe_before.txt"
           python3 before/.github/script/seekdb/sdb.py destroy \
             --base-dir "$GITHUB_WORKSPACE/run_before"
 
@@ -170,6 +179,13 @@ jobs:
             export LABEL="after"
             (cd before && bash tools/benchmark/fts_large_bench.sh)
           done
+          "$CLIENT" -h 127.0.0.1 -P"$SEEKDB_PORT" -uroot -N -s --default-character-set=utf8mb4 \
+            -D fts_large_bench -e "
+          select id from docs where MATCH(content) AGAINST('倒排索引 tokenizer') limit 20;
+          select count(*) from docs where MATCH(title, content) AGAINST('全文索引 分词器');
+          select tokenize('OceanBase 是一席非常稳定的数据库，全文索引的分词器热点包括解析器实例复用与停用词全局单例', 'ik');
+          select tokenize('The quick brown fox jumps over the lazy dog. Full-text search indexing requires efficient tokenization.', 'beng');
+          " > "$GITHUB_WORKSPACE/reports/probe_after.txt"
           python3 before/.github/script/seekdb/sdb.py destroy \
             --base-dir "$GITHUB_WORKSPACE/run_after"
 
@@ -186,6 +202,17 @@ jobs:
               "$GITHUB_WORKSPACE/reports/after_${rep}.txt" --json \
               > "$GITHUB_WORKSPACE/reports/score_after_${rep}.json"
           done
+
+      - name: Check that the observable behaviour did not change
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! diff -u "$GITHUB_WORKSPACE/reports/probe_before.txt" \
+                       "$GITHUB_WORKSPACE/reports/probe_after.txt"; then
+            echo "ERROR: the candidate returns different rows or different tokens" >&2
+            exit 1
+          fi
+          echo "the rows of the limited query and the tokens are identical"
 
       - name: Compare before and after
         shell: bash
