@@ -87,15 +87,20 @@ jobs:
       - name: Build the baseline binary
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
           cd before
-          ./build.sh release --init
-          make -C build_release -j4
+          {
+            ./build.sh release --init
+            make -C build_release -j4
+          } 2>&1 | tee "$GITHUB_WORKSPACE/build_before.log"
+          status=${PIPESTATUS[0]}
+          echo "build exit code: $status"
           test -x build_release/src/observer/seekdb
           # Keep the baseline binary next to the candidate one so both resolve
           # their share files through the same relative path.
           cp build_release/src/observer/seekdb build_release/src/observer/seekdb_before
+          exit $status
 
       - name: Apply the candidate patch
         shell: bash
@@ -111,10 +116,15 @@ jobs:
           # measures the patch and not the rebuild.
           rm -rf build_release
           if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
-          ./build.sh release
-          make -C build_release -j4
+          {
+            ./build.sh release
+            make -C build_release -j4
+          } 2>&1 | tee "$GITHUB_WORKSPACE/build_after.log"
+          status=${PIPESTATUS[0]}
+          echo "build exit code: $status"
           test -x build_release/src/observer/seekdb
           cp build_release/src/observer/seekdb build_release/src/observer/seekdb_after
+          exit $status
 
       - name: Benchmark the baseline
         shell: bash
@@ -230,4 +240,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fts-ab-report
-          path: reports/
+          path: |
+            reports/
+            build_before.log
+            build_after.log
