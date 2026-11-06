@@ -20,14 +20,15 @@
 #include "ob_ai_func.h"
 #include "lib/utility/utility.h"
 #include "common/json_type/ob_json_common.h"
+#include "sql/engine/expr/ob_expr_lob_utils.h"
 
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
 
-namespace oceanbase 
+namespace oceanbase
 {
-namespace sql 
+namespace sql
 {
 
 ObExprAIPrompt::ObExprAIPrompt(common::ObIAllocator &alloc)
@@ -52,9 +53,11 @@ int ObExprAIPrompt::calc_result_typeN(ObExprResType &type,
   int ret = OB_SUCCESS;
   bool is_null_res = false;
   ObExprResType template_type = types_stack[0];
-  if (!ob_is_string_tc(template_type.get_type())) {
+  if (!ob_is_string_tc(template_type.get_type()) && !ob_is_text_tc(template_type.get_type())) {
+    // The template is the text that the arguments are put into, so it is
+    // either a string or a large object, but never a JSON value.
     ret = OB_ERR_INVALID_TYPE_FOR_OP;
-  } else {
+  } else if (ob_is_string_tc(template_type.get_type())) {
     types_stack[0].set_calc_type(ObVarcharType);
     types_stack[0].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
   }
@@ -63,9 +66,11 @@ int ObExprAIPrompt::calc_result_typeN(ObExprResType &type,
     if (ob_is_string_tc(types_stack[i].get_type())) {
       types_stack[i].set_calc_type(ObVarcharType);
       types_stack[i].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
+    } else if (ob_is_text_tc(types_stack[i].get_type())) {
+      // The large object is read as its real string data.
     } else if (ob_is_json(types_stack[i].get_type())) {
-      ret = OB_NOT_SUPPORTED;
-      LOG_USER_ERROR(OB_NOT_SUPPORTED, "json type is not supported");
+      // The JSON value is kept as JSON, so that the prompt object carries the
+      // structure of the argument.
     } else {
       ret = OB_ERR_INVALID_TYPE_FOR_OP;
     }
@@ -94,6 +99,15 @@ int ObExprAIPrompt::eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
   if (OB_FAIL(tmp_allocator.eval_arg(arg0, ctx, template_datum))) {
   } else if (template_datum->is_null()) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (ob_is_text_tc(arg0->datum_meta_.type_)) {
+    // The template is stored outside of the row, so its real data is read.
+    if (OB_FAIL(ObTextStringHelper::read_real_string_data(ctx.exec_ctx_,
+                                                           tmp_allocator,
+                                                           *template_datum,
+                                                           arg0->datum_meta_,
+                                                           arg0->obj_meta_.has_lob_header(),
+                                                           template_str))) {
+    }
   } else {
     template_str = template_datum->get_string();
   }
@@ -112,9 +126,25 @@ int ObExprAIPrompt::eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
         if (OB_FAIL(ObAIFuncJsonUtils::get_json_string(tmp_allocator, arg_str, arg_json_str))) {
         } else if (OB_FAIL(args_array->append(arg_json_str))) {
         }
+      } else if (ob_is_text_tc(arg->datum_meta_.type_)) {
+        // The argument is stored outside of the row, so its real data is read.
+        if (OB_FAIL(ObTextStringHelper::read_real_string_data(ctx.exec_ctx_,
+                                                               tmp_allocator,
+                                                               *datum,
+                                                               arg->datum_meta_,
+                                                               arg->obj_meta_.has_lob_header(),
+                                                               arg_str))) {
+        } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_string(tmp_allocator, arg_str, arg_json_str))) {
+        } else if (OB_FAIL(args_array->append(arg_json_str))) {
+        }
       } else if (ob_is_json(arg->datum_meta_.type_)) {
-        ret = OB_NOT_SUPPORTED;
-        LOG_USER_ERROR(OB_NOT_SUPPORTED, "json type is not supported");
+        // The JSON argument keeps its own structure inside the prompt object.
+        ObIJsonBase *j_base = NULL;
+        if (OB_FAIL(ObJsonExprHelper::get_json_val(expr, ctx, &tmp_allocator, static_cast<uint16_t>(i), j_base))) {
+        } else if (OB_ISNULL(j_base)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(args_array->append(static_cast<ObJsonNode *>(j_base)))) {
+        }
       } else if (datum->is_null()) {
         ret = OB_ERR_INVALID_TYPE_FOR_OP;
       }
