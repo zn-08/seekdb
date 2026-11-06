@@ -47,6 +47,7 @@ ObTextRetrievalTokenIter::ObTextRetrievalTokenIter()
     advance_doc_id_(),
     token_doc_cnt_calculated_(false),
     inv_idx_agg_cache_mode_(false),
+    relevance_evaluated_(false),
     is_inited_(false)
 {
 }
@@ -92,10 +93,12 @@ void ObTextRetrievalTokenIter::reset()
 {
   relevance_calc_exprs_.reset();
   token_doc_cnt_calculated_ = false;
+  relevance_evaluated_ = false;
 }
 
 void ObTextRetrievalTokenIter::reuse()
 {
+  relevance_evaluated_ = false;
   if (inv_idx_agg_cache_mode_ && !inv_idx_agg_param_->need_switch_param_) {
     // do nothing
   } else {
@@ -214,6 +217,8 @@ int ObTextRetrievalTokenIter::get_next_row()
       } else if (OB_FAIL(fill_token_weight())) {
       } else if (OB_FAIL(eval_relevance_expr())) {
       }
+      // The row wise evaluation fills one datum, not the batch vector.
+      relevance_evaluated_ = false;
     }
   }
   return ret;
@@ -232,6 +237,10 @@ int ObTextRetrievalTokenIter::batch_eval_relevance_expr(const int64_t count)
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(relevance_expr_->eval_batch(*eval_ctx_, *skip_, count))) {
+  } else {
+    // The values are in the datum vector now, so a reader of the same batch
+    // does not have to evaluate the expression again.
+    relevance_evaluated_ = true;
   }
   return ret;
 }
@@ -501,7 +510,10 @@ int ObTextRetrievalDaaTTokenIter::save_relevances_and_docids()
   int ret = OB_SUCCESS;
   if (OB_ISNULL(relevance_expr_) || OB_ISNULL(inv_scan_domain_id_col_)) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_FAIL(relevance_expr_->eval_batch(*eval_ctx_, *token_iter_->get_skip(), count_))) {
+  } else if (!token_iter_->relevance_evaluated()
+             && OB_FAIL(relevance_expr_->eval_batch(*eval_ctx_, *token_iter_->get_skip(), count_))) {
+    // The batch of the inverted index scan already evaluated the relevance of
+    // these rows, so the values are read instead of being computed again.
   } else {
     cur_idx_ = 0;
     const ObDatumVector &relevance_datum = relevance_expr_->locate_expr_datumvector(*eval_ctx_);

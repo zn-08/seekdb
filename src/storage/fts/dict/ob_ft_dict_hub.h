@@ -17,8 +17,10 @@
 #ifndef _OCEANBASE_STORAGE_FTS_DICT_OB_FT_DICT_HUB_H_
 #define _OCEANBASE_STORAGE_FTS_DICT_OB_FT_DICT_HUB_H_
 
+#include "lib/allocator/ob_allocator.h"
 #include "lib/charset/ob_charset.h"
 #include "lib/lock/ob_bucket_lock.h"
+#include "storage/fts/dict/ob_ft_cache_container.h"
 #include "storage/fts/dict/ob_ft_dict_def.h"
 
 namespace oceanbase
@@ -93,10 +95,15 @@ private:
 };
 
 class ObFTCacheRangeContainer;
+class ObFTRangeDict;
 class ObFTDictHub
 {
 public:
-  ObFTDictHub() : is_inited_(false), dict_map_(), rw_dict_lock_() {}
+  ObFTDictHub()
+      : is_inited_(false), dict_map_(), rw_dict_lock_(), shared_dict_lock_(), shared_dict_map_(),
+        shared_dict_alloc_()
+  {
+  }
   ~ObFTDictHub() {}
 
   int init();
@@ -107,17 +114,53 @@ public:
 
   int load_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &container);
 
+  /**
+   * Return the dictionary of one dictionary type, building it once.
+   *
+   * A dictionary is read-only once it is built, so one build can serve every
+   * parser.  Building the dictionaries again for every segment() call made
+   * every indexed row pay for the dictionary setup: one cache lookup per
+   * dictionary range and one allocation per range, again and again.
+   *
+   * The returned dictionary stays owned by the hub, so it outlives the parser
+   * that borrowed it and the cache blocks it pins stay valid.
+   */
+  int get_shared_dict(const ObFTDictDesc &desc, ObFTRangeDict *&dict);
+
+  /**
+   * Drop the shared dictionaries so that the next user builds them again.
+   */
+  void clear_shared_dicts();
+
 private:
   int get_dict_info(const ObFTDictInfoKey &key, ObFTDictInfo &info);
 
   int put_dict_info(const ObFTDictInfoKey &key, const ObFTDictInfo &info);
 
+private:
+  struct ObFTSharedDict
+  {
+    ObFTCacheRangeContainer container;
+    ObFTRangeDict *dict;
+    explicit ObFTSharedDict(ObIAllocator &alloc) : container(alloc), dict(nullptr) {}
+  };
+
+  int get_shared_dict_info(const ObFTDictInfoKey &key, ObFTSharedDict *&info);
+
+  int put_shared_dict_info(const ObFTDictInfoKey &key, ObFTSharedDict *info);
+
+  int build_shared_dict(const ObFTDictDesc &desc, const ObFTDictInfoKey &key, ObFTSharedDict *&info);
 
 private:
   bool is_inited_;
   // holds info of dict
   hash::ObHashMap<ObFTDictInfoKey, ObFTDictInfo> dict_map_;
   ObBucketLock rw_dict_lock_;
+  // The dictionaries that every parser shares.  They have their own lock so
+  // that building one does not block the dictionary info above.
+  ObBucketLock shared_dict_lock_;
+  hash::ObHashMap<ObFTDictInfoKey, ObFTSharedDict *> shared_dict_map_;
+  ObArenaAllocator shared_dict_alloc_;
 };
 
 } //  namespace storage

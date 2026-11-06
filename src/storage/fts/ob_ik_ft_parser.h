@@ -74,7 +74,13 @@ private:
 private:
   int init_dict(const ObFTParserParam &param);
 
+  int get_shared_dict(const ObFTDictDesc &desc, ObIFTDict *&dict);
+
   int init_single_dict(ObFTDictDesc desc, ObFTCacheRangeContainer &container);
+
+  int build_dict_from_cache(const ObFTDictDesc &desc,
+                            ObFTCacheRangeContainer &container,
+                            ObIFTDict *&dict);
 
   int init_segmenter(const ObFTParserParam &param);
 
@@ -83,10 +89,6 @@ private:
   void reset();
 
   bool should_read_newest_table() const;
-
-  int build_dict_from_cache(const ObFTDictDesc &desc,
-                            ObFTCacheRangeContainer &container,
-                            ObIFTDict *&dict);
 
 private:
   static constexpr int SEGMENT_LIMIT = 1000;
@@ -103,6 +105,7 @@ private:
   ObFTCacheRangeContainer cache_quan_;
   ObFTCacheRangeContainer cache_stop_;
 
+  // The dictionaries are owned by the dictionary hub and borrowed here.
   ObIFTDict *dict_main_;
   ObIFTDict *dict_quan_;
   ObIFTDict *dict_stop_;

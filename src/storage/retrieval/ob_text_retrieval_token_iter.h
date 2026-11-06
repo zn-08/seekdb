@@ -81,6 +81,14 @@ public:
   sql::ObBitVector *get_skip() { return skip_; }
   int get_token_doc_cnt(int64_t &token_doc_cnt) const;
   double get_max_token_relevance() const { return max_token_relevance_; }
+  /**
+   * Return whether the relevance of the current batch was already evaluated.
+   *
+   * The batch of the inverted index scan evaluates the relevance expression, so
+   * the caller can read the values instead of evaluating the expression a
+   * second time for the same rows.
+   */
+  inline bool relevance_evaluated() const { return relevance_evaluated_; }
 private:
   int init_calc_exprs_in_relevance_expr();
   void clear_batch_wise_evaluated_flag(const int64_t count);
@@ -115,6 +123,7 @@ private:
   ObDocIdExt advance_doc_id_;
   bool token_doc_cnt_calculated_;
   bool inv_idx_agg_cache_mode_;
+  bool relevance_evaluated_;
   bool is_inited_;
   DISALLOW_COPY_AND_ASSIGN(ObTextRetrievalTokenIter);
 };

@@ -34,6 +34,8 @@ int ObFTDictHub::init()
   int ret = OB_SUCCESS;
   if (OB_FAIL(dict_map_.create(K_MAX_DICT_BUCKET, "dict_map"))) {
   } else if (OB_FAIL(rw_dict_lock_.init(K_MAX_DICT_BUCKET))) {
+  } else if (OB_FAIL(shared_dict_lock_.init(K_MAX_DICT_BUCKET))) {
+  } else if (OB_FAIL(shared_dict_map_.create(K_MAX_DICT_BUCKET, "shared_dict_map"))) {
   } else {
     is_inited_ = true;
   }
@@ -44,6 +46,7 @@ int ObFTDictHub::destroy()
 {
   int ret = OB_SUCCESS;
   is_inited_ = false;
+  clear_shared_dicts();
   return ret;
 }
 int ObFTDictHub::build_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &container)
@@ -132,6 +135,103 @@ int ObFTDictHub::put_dict_info(const ObFTDictInfoKey &key, const ObFTDictInfo &i
   int ret = OB_SUCCESS;
   const int cover_exist_flag = 1;
   if (OB_FAIL(dict_map_.set_refactored(key, info, cover_exist_flag))) {
+  }
+
+  return ret;
+}
+
+int ObFTDictHub::get_shared_dict(const ObFTDictDesc &desc, ObFTRangeDict *&dict)
+{
+  int ret = OB_SUCCESS;
+  ObFTDictInfoKey key(static_cast<uint64_t>(desc.type_));
+  ObFTSharedDict *info = nullptr;
+
+  if (!is_inited_) {
+    ret = OB_NOT_INIT;
+  } else {
+    {
+      ObBucketHashRLockGuard guard(shared_dict_lock_, key.hash());
+      if (OB_SUCC(get_shared_dict_info(key, info)) && OB_NOT_NULL(info) && OB_NOT_NULL(info->dict)) {
+        dict = info->dict;
+        return OB_SUCCESS;
+      }
+    }
+    ObBucketHashWLockGuard guard(shared_dict_lock_, key.hash());
+    if (OB_SUCC(get_shared_dict_info(key, info)) && OB_NOT_NULL(info) && OB_NOT_NULL(info->dict)) {
+      dict = info->dict;
+    } else if (OB_FAIL(build_shared_dict(desc, key, info))) {
+      STORAGE_FTS_LOG(WARN, "Failed to build the shared dictionary", K(ret), K(desc.type_));
+    } else if (OB_NOT_NULL(info)) {
+      dict = info->dict;
+    }
+  }
+
+  return ret;
+}
+
+void ObFTDictHub::clear_shared_dicts()
+{
+  // The shared dictionaries live as long as the hub, and the hub lives as long
+  // as the process, so the cache blocks they pin stay valid until the process
+  // goes away.  Releasing them here would only hand the blocks back while the
+  // dictionaries that read them are still around.
+}
+
+int ObFTDictHub::get_shared_dict_info(const ObFTDictInfoKey &key, ObFTSharedDict *&info)
+{
+  int ret = OB_SUCCESS;
+
+  if (OB_FAIL(shared_dict_map_.get_refactored(key, info))) {
+    if (OB_HASH_NOT_EXIST != ret) {
+    }
+  }
+
+  return ret;
+}
+
+int ObFTDictHub::put_shared_dict_info(const ObFTDictInfoKey &key, ObFTSharedDict *info)
+{
+  int ret = OB_SUCCESS;
+  const int cover_exist_flag = 1;
+  if (OB_FAIL(shared_dict_map_.set_refactored(key, info, cover_exist_flag))) {
+  }
+
+  return ret;
+}
+
+int ObFTDictHub::build_shared_dict(const ObFTDictDesc &desc,
+                                  const ObFTDictInfoKey &key,
+                                  ObFTSharedDict *&info)
+{
+  int ret = OB_SUCCESS;
+  ObFTSharedDict *entry = OB_NEWx(ObFTSharedDict, &shared_dict_alloc_, shared_dict_alloc_);
+  if (OB_ISNULL(entry)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else {
+    if (OB_FAIL(load_cache(desc, entry->container))) {
+      if (OB_ENTRY_NOT_EXIST == ret) {
+        if (OB_FAIL(build_cache(desc, entry->container))) {
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      ObFTRangeDict *dict
+          = OB_NEWx(ObFTRangeDict, &shared_dict_alloc_, shared_dict_alloc_, &entry->container, desc);
+      if (OB_ISNULL(dict)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else if (OB_FAIL(dict->init())) {
+        OB_DELETEx(ObFTRangeDict, &shared_dict_alloc_, dict);
+      } else {
+        entry->dict = dict;
+        ret = put_shared_dict_info(key, entry);
+      }
+    }
+    if (OB_FAIL(ret)) {
+      entry->~ObFTSharedDict();
+      shared_dict_alloc_.free(entry);
+      entry = nullptr;
+    }
+    info = entry;
   }
 
   return ret;
