@@ -107,6 +107,10 @@ int ObExprAIRerank::eval_ai_rerank(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_rerank, model id or query or documents is null");
     res.set_null();
   } else {
+    if (OB_NOT_NULL(arg_doc_key) && arg_doc_key->is_null()) {
+      // A null document key means that the documents are plain strings.
+      arg_doc_key = nullptr;
+    }
     ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
     
     MultimodeAlloctor temp_allocator(tmp_alloc_g.get_allocator());
