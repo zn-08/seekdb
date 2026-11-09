@@ -1,0 +1,102 @@
+name: Competition Deploy
+
+# Deploy the released seekdb package on the runner and report the telemetry id.
+#
+# The basic-practice challenge asks for the telemetry id of a deployed
+# instance, which is the content.id of run/telemetry.json.  The platform looks
+# the id up in the telemetry service, so the instance has to report itself
+# there; this workflow starts a real instance and prints what it reported.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - competition-deploy
+
+permissions:
+  contents: read
+
+env:
+  SEEKDB_VERSION: 'v1.4.0'
+  # The rpm is a quarter of the size of the deb, which the release CDN serves
+  # much more reliably.
+  PKG_NAME: 'seekdb-1.4.0-100000172026082615.el9.x86_64.rpm'
+
+jobs:
+  deploy:
+    name: deploy and report the telemetry id
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Free Disk Space
+        uses: insightsengineering/disk-space-reclaimer@v1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+          docker-images: true
+          tools-cache: false
+
+      - name: Install the runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libaio1 libaio-dev libncurses5 libncurses-dev curl ca-certificates
+
+      - name: Download and unpack seekdb
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/pkg"
+          curl -fL --retry 8 --retry-delay 10 --retry-all-errors --max-time 900 -C - \
+            -o "$GITHUB_WORKSPACE/pkg/seekdb.rpm" \
+            "https://github.com/oceanbase/seekdb/releases/download/${SEEKDB_VERSION}/${PKG_NAME}"
+          ls -la "$GITHUB_WORKSPACE/pkg"
+          mkdir -p "$GITHUB_WORKSPACE/pkg/root"
+          cd "$GITHUB_WORKSPACE/pkg/root"
+          rpm2cpio "$GITHUB_WORKSPACE/pkg/seekdb.rpm" | cpio -idm --quiet
+          find "$GITHUB_WORKSPACE/pkg/root" -type f -name seekdb -perm -u+x | tee "$GITHUB_WORKSPACE/seekdb_path.txt"
+          test -s "$GITHUB_WORKSPACE/seekdb_path.txt"
+
+      - name: Start the instance
+        shell: bash
+        run: |
+          set -euo pipefail
+          SEEKDB_BIN="$(cat seekdb_path.txt | head -1)"
+          echo "binary: $SEEKDB_BIN"
+          mkdir -p "$GITHUB_WORKSPACE/deploy"
+          cd "$GITHUB_WORKSPACE/deploy"
+          "$SEEKDB_BIN" --base-dir="$GITHUB_WORKSPACE/deploy/run" --port=2881 --nodaemon &
+          echo $! > "$GITHUB_WORKSPACE/deploy/seekdb.pid"
+          sleep 20
+          tail -20 "$GITHUB_WORKSPACE/deploy/run/log/observer.log" 2>/dev/null || true
+
+      - name: Wait for the telemetry report
+        shell: bash
+        run: |
+          set -uo pipefail
+          for _ in $(seq 1 60); do
+            if [[ -f "$GITHUB_WORKSPACE/deploy/run/telemetry.json" ]]; then
+              echo "===== telemetry.json ====="
+              cat "$GITHUB_WORKSPACE/deploy/run/telemetry.json"
+              echo
+              TELEMETRY_FILE="$GITHUB_WORKSPACE/deploy/run/telemetry.json" python3 -c 'import json, os; payload = json.load(open(os.environ["TELEMETRY_FILE"], encoding="utf-8")); content = payload.get("content", {}); print("TELEMETRY_ID:", content.get("id")); print("SENT:", payload.get("sent"))'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "no telemetry file was written" >&2
+          exit 1
+
+      - name: Upload the telemetry record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seekdb-telemetry
+          path: |
+            deploy/run/telemetry.json
+            deploy/run/log/observer.log
