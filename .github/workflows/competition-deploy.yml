@@ -114,6 +114,27 @@ jobs:
           tail -40 "$GITHUB_WORKSPACE/deploy/log/seekdb.log" >&2 || true
           exit 1
 
+      - name: Report the telemetry payload and check the answer
+        shell: bash
+        run: |
+          set -uo pipefail
+          for _ in $(seq 1 30); do
+            [[ -f "$GITHUB_WORKSPACE/deploy/run/telemetry.json" ]] && break
+            sleep 2
+          done
+          echo "=== report answer ==="
+          HTTP_CODE="$(curl -sS -m 60 -o /tmp/report.out -w '%{http_code}' \
+            -X POST -H 'Content-Type: application/json' \
+            --data-binary @"$GITHUB_WORKSPACE/deploy/run/telemetry.json" \
+            https://openwebapi.oceanbase.com/api/web/oceanbase/report || echo 000)"
+          echo "HTTP $HTTP_CODE"
+          cat /tmp/report.out || true
+          echo
+          cp /tmp/report.out "$GITHUB_WORKSPACE/deploy/report-answer.json" 2>/dev/null || true
+          echo "=== the id to submit ==="
+          jq -r '"TELEMETRY_ID: " + (.content.id // "none")' \
+            "$GITHUB_WORKSPACE/deploy/run/telemetry.json" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Upload the telemetry record
         if: always()
         uses: actions/upload-artifact@v4
@@ -121,5 +142,6 @@ jobs:
           name: seekdb-telemetry
           path: |
             deploy/run/telemetry.json
+            deploy/report-answer.json
             deploy/log/
           if-no-files-found: warn
