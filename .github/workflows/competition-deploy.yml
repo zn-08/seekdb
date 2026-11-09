@@ -6,6 +6,10 @@ name: Competition Deploy
 # instance, which is the content.id of run/telemetry.json.  The platform looks
 # the id up in the telemetry service, so the instance has to report itself
 # there; this workflow starts a real instance and prints what it reported.
+#
+# The layout matters: the server changes its working directory to the base
+# directory (src/observer/main.cpp), so with --base-dir=<dir> the telemetry
+# record is written to <dir>/run/telemetry.json and the log to <dir>/log.
 
 on:
   workflow_dispatch:
@@ -26,7 +30,7 @@ jobs:
   deploy:
     name: deploy and report the telemetry id
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - name: Free Disk Space
         uses: insightsengineering/disk-space-reclaimer@v1
@@ -65,31 +69,52 @@ jobs:
       - name: Start the instance
         shell: bash
         run: |
-          set -euo pipefail
-          SEEKDB_BIN="$(cat seekdb_path.txt | head -1)"
+          set -uo pipefail
+          SEEKDB_BIN="$(cat "$GITHUB_WORKSPACE/seekdb_path.txt" | head -1)"
           echo "binary: $SEEKDB_BIN"
+          "$SEEKDB_BIN" --version || true
           mkdir -p "$GITHUB_WORKSPACE/deploy"
           cd "$GITHUB_WORKSPACE/deploy"
-          "$SEEKDB_BIN" --base-dir="$GITHUB_WORKSPACE/deploy/run" --port=2881 --nodaemon &
+          "$SEEKDB_BIN" --base-dir="$GITHUB_WORKSPACE/deploy" --port=2881 --nodaemon &
           echo $! > "$GITHUB_WORKSPACE/deploy/seekdb.pid"
-          sleep 20
-          tail -20 "$GITHUB_WORKSPACE/deploy/run/log/observer.log" 2>/dev/null || true
+          sleep 30
+          echo "=== process ==="
+          ps -p "$(cat "$GITHUB_WORKSPACE/deploy/seekdb.pid")" -o pid,stat,etime,cmd || true
+          echo "=== layout ==="
+          ls -la "$GITHUB_WORKSPACE/deploy" || true
+          ls -la "$GITHUB_WORKSPACE/deploy/run" 2>/dev/null || true
+          ls -la "$GITHUB_WORKSPACE/deploy/log" 2>/dev/null || true
+          echo "=== log tail ==="
+          tail -30 "$GITHUB_WORKSPACE/deploy/log/seekdb.log" 2>/dev/null || true
+          tail -30 "$GITHUB_WORKSPACE/deploy/log/observer.log" 2>/dev/null || true
 
       - name: Wait for the telemetry report
         shell: bash
         run: |
           set -uo pipefail
-          for _ in $(seq 1 60); do
+          for _ in $(seq 1 90); do
             if [[ -f "$GITHUB_WORKSPACE/deploy/run/telemetry.json" ]]; then
               echo "===== telemetry.json ====="
               cat "$GITHUB_WORKSPACE/deploy/run/telemetry.json"
               echo
-              TELEMETRY_FILE="$GITHUB_WORKSPACE/deploy/run/telemetry.json" python3 -c 'import json, os; payload = json.load(open(os.environ["TELEMETRY_FILE"], encoding="utf-8")); content = payload.get("content", {}); print("TELEMETRY_ID:", content.get("id")); print("SENT:", payload.get("sent"))'
+              TELEMETRY_FILE="$GITHUB_WORKSPACE/deploy/run/telemetry.json" python3 -c '
+import json, os
+payload = json.load(open(os.environ["TELEMETRY_FILE"], encoding="utf-8"))
+content = payload.get("content", {})
+print("TELEMETRY_ID:", content.get("id"))
+print("SENT:", payload.get("sent"))
+print("VERSION:", content.get("version"))
+print("EVENT:", content.get("event"))
+' | tee -a "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
             sleep 5
           done
           echo "no telemetry file was written" >&2
+          echo "=== everything under deploy ===" >&2
+          find "$GITHUB_WORKSPACE/deploy" -maxdepth 3 | head -60 >&2
+          echo "=== log tail ===" >&2
+          tail -40 "$GITHUB_WORKSPACE/deploy/log/seekdb.log" >&2 || true
           exit 1
 
       - name: Upload the telemetry record
@@ -99,4 +124,5 @@ jobs:
           name: seekdb-telemetry
           path: |
             deploy/run/telemetry.json
-            deploy/run/log/observer.log
+            deploy/log/
+          if-no-files-found: warn
