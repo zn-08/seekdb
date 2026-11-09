@@ -97,15 +97,12 @@ jobs:
               echo "===== telemetry.json ====="
               cat "$GITHUB_WORKSPACE/deploy/run/telemetry.json"
               echo
-              TELEMETRY_FILE="$GITHUB_WORKSPACE/deploy/run/telemetry.json" python3 -c '
-import json, os
-payload = json.load(open(os.environ["TELEMETRY_FILE"], encoding="utf-8"))
-content = payload.get("content", {})
-print("TELEMETRY_ID:", content.get("id"))
-print("SENT:", payload.get("sent"))
-print("VERSION:", content.get("version"))
-print("EVENT:", content.get("event"))
-' | tee -a "$GITHUB_STEP_SUMMARY"
+              TELEMETRY_FILE="$GITHUB_WORKSPACE/deploy/run/telemetry.json" jq -r '
+                "TELEMETRY_ID: " + (.content.id // "none"),
+                "SENT: " + ((.sent // false) | tostring),
+                "VERSION: " + (.content.version // "none"),
+                "EVENT: " + (.content.event // "none")
+              ' | tee -a "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
             sleep 5
