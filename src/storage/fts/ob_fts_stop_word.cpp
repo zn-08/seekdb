@@ -74,36 +74,50 @@ void ObStopWordChecker::destroy()
 int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
 {
   int ret = OB_SUCCESS;
-  
-  
-  common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else {
     common::ObString cmp_str;
-    // do nothing set out with in if type is the same.
-    if (OB_FAIL(common::ObCharset::charset_convert(
-                                       allocator,
-                                       word.get_word().get_string(),
-                                       word.get_collation_type(),
-                                       stopword_type_.get_collation_type(),
-                                       cmp_str))) {
+    // The stop word set is kept in the general collation.  A word that already
+    // uses that collation does not need a conversion, and skipping it keeps the
+    // hot path free of an allocator: this check runs once per token of every
+    // indexed document.
+    if (word.get_collation_type() == stopword_type_.get_collation_type()) {
+      cmp_str = word.get_word().get_string();
+      ret = lookup_stopword(cmp_str, is_stopword);
     } else {
-      ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
-      ret = stopword_set_.exist_refactored(converted);
-      if (OB_HASH_NOT_EXIST == ret) {
-        is_stopword = false;
-        ret = OB_SUCCESS;
-      } else if (OB_HASH_EXIST == ret) {
-        is_stopword = true;
-        ret = OB_SUCCESS;
-      } else if (OB_SUCC(ret)) {
-        ret = OB_ERR_UNEXPECTED;
+      // The arena has to outlive the lookup because the converted text lives
+      // in it.
+      common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
+      if (OB_FAIL(common::ObCharset::charset_convert(
+                     allocator,
+                     word.get_word().get_string(),
+                     word.get_collation_type(),
+                     stopword_type_.get_collation_type(),
+                     cmp_str))) {
       } else {
+        ret = lookup_stopword(cmp_str, is_stopword);
       }
     }
+  }
+  return ret;
+}
+
+int ObStopWordChecker::lookup_stopword(const common::ObString &cmp_str, bool &is_stopword)
+{
+  int ret = OB_SUCCESS;
+  ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
+  ret = stopword_set_.exist_refactored(converted);
+  if (OB_HASH_NOT_EXIST == ret) {
+    is_stopword = false;
+    ret = OB_SUCCESS;
+  } else if (OB_HASH_EXIST == ret) {
+    is_stopword = true;
+    ret = OB_SUCCESS;
+  } else if (OB_SUCC(ret)) {
+    ret = OB_ERR_UNEXPECTED;
   }
   return ret;
 }
@@ -158,21 +172,48 @@ bool ObAddWord::is_min_max_word(const int64_t c_len) const
   return flag_.min_max_word() && (c_len < min_token_size_ || c_len > max_token_size_);
 }
 
+/// Return whether the text is plain ASCII without an upper case letter.
+///
+/// The lower case conversion of such a text returns the same bytes, so it can
+/// be skipped without changing the token.
+static bool is_plain_lower_ascii(const ObString &str)
+{
+  const char *data = str.ptr();
+  if (OB_ISNULL(data)) {
+    return false;
+  }
+  for (int64_t i = 0; i < str.length(); ++i) {
+    const unsigned char ch = static_cast<unsigned char>(data[i]);
+    if (ch >= 0x80 || (ch >= 'A' && ch <= 'Z')) {
+      return false;
+    }
+  }
+  return true;
+}
+
 int ObAddWord::casedown_word(const ObFTWord &src, ObFTWord &dst)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(src.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (flag_.casedown()) {
-    ObString dst_str;
-    if (OB_FAIL(ObCharset::tolower(
-                    word_meta_.get_collation_type(),
-                    src.get_word().get_string(),
-                    dst_str,
-                    allocator_))) {
+    ObString src_str = src.get_word().get_string();
+    if (is_plain_lower_ascii(src_str)) {
+      // Lowering this text returns the same bytes, so the conversion and the
+      // allocation it needs can be skipped.  This runs once per token of every
+      // indexed document.
+      dst = src;
     } else {
-      ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
-      dst = tmp;
+      ObString dst_str;
+      if (OB_FAIL(ObCharset::tolower(
+                      word_meta_.get_collation_type(),
+                      src_str,
+                      dst_str,
+                      allocator_))) {
+      } else {
+        ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
+        dst = tmp;
+      }
     }
   } else {
     dst = src;

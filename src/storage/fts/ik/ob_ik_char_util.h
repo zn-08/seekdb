@@ -448,17 +448,24 @@ inline int ObFTCharUtil::do_classify(const char *input, const uint8_t char_len, 
   bool checker = false;
   type = CharType::USELESS;
 
-  if (OB_FAIL(is_alpha<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
+  // Every check below needs the code point of the character, and each of them
+  // used to decode the character on its own.  A character was therefore decoded
+  // up to four times before it was classified, and the tokenizer classifies
+  // every character of every document twice: once while it scans the text and
+  // once more while the arbitrator walks the text to collect the tokens.
+  // Decoding once and classifying the code point keeps the result the same and
+  // takes the repeated decoding out of the hot path.
+  ob_wc_t unicode = 0;
+  if (OB_FAIL(decode_unicode<CS_TYPE>(input, char_len, unicode))) {
+    // The character could not be decoded, report the error the way the checks
+    // below would have done.
+  } else if (ObUnicodeBlockUtils::is_alpha(unicode)) {
     type = CharType::ENGLISH_LETTER;
-  } else if (OB_FAIL(is_arabic<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
+  } else if (ObUnicodeBlockUtils::is_arabic(unicode)) {
     type = CharType::ARABIC_LETTER;
-  } else if (OB_FAIL(is_chinese<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
+  } else if (ObUnicodeBlockUtils::is_chinese(unicode)) {
     type = CharType::CHINESE;
-  } else if (OB_FAIL(is_other_cjk<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
+  } else if (ObUnicodeBlockUtils::is_other_cjk(unicode)) {
     type = CharType::OTHER_CJK;
   } else if (OB_FAIL(is_surrogate_high<CS_TYPE>(input, char_len, checker))) {
   } else if (checker) {
@@ -480,6 +487,22 @@ inline int ObFTCharUtil::classify_first_char(ObCollationType coll_type,
 
   switch (cs_type) {
   case CHARSET_UTF8MB4: {
+    // A single byte below 0x80 is the code point itself, so its class is
+    // known without decoding it.  Most of the text of a latin document is
+    // made of such bytes.
+    if (char_len == 1 && OB_NOT_NULL(input)) {
+      const unsigned char ch = static_cast<unsigned char>(input[0]);
+      if (ch < 0x80) {
+        if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) {
+          type = CharType::ENGLISH_LETTER;
+        } else if (ch >= '0' && ch <= '9') {
+          type = CharType::ARABIC_LETTER;
+        } else {
+          type = CharType::USELESS;
+        }
+        break;
+      }
+    }
     ret = do_classify<CHARSET_UTF8MB4>(input, char_len, type);
     break;
   }
