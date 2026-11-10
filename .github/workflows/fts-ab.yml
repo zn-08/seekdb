@@ -1,0 +1,156 @@
+name: FTS A/B
+
+# Measure two refs of seekdb on one machine.
+#
+# The grading baseline was measured on the grading runner, so a report that was
+# produced on any other machine says nothing about the score, and even two
+# reports that were produced on two different runners differ by more than the
+# effect of a good patch.  This workflow therefore builds both refs, keeps both
+# binaries and runs the benchmark of one binary after the other on the same
+# runner, so that the two numbers can be compared.
+#
+# The base build is done first and its binary is kept aside.  The candidate is
+# then built from the same build tree, which only recompiles the files that
+# differ, and the two binaries are benchmarked alternately.
+#
+# The refs are part of the workflow: change them and push to perf/fts-ab to
+# measure another pair.
+
+on:
+  push:
+    branches:
+      - 'perf/fts-ab'
+
+permissions:
+  contents: read
+
+env:
+  SEEKDB_PORT: '2881'
+  RUN_DIR: '${{ github.workspace }}/seekdb_run'
+  BASE_REF: '2026-competition'
+  CANDIDATE_REF: 'perf/fts-opt'
+  ROUNDS: '2'
+
+jobs:
+  fts-ab:
+    name: build both and benchmark them alternately
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - name: Free Disk Space
+        uses: insightsengineering/disk-space-reclaimer@v1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+          docker-images: true
+          tools-cache: false
+
+      - uses: actions/checkout@v4
+        with:
+          ref: 'perf/fts-ab'
+          fetch-depth: 0
+
+      - name: Install build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git wget rpm rpm2cpio cpio make build-essential binutils m4 \
+            libtool-bin libncurses5 python3 python3-pip \
+            libncurses-dev libaio-dev libaio1 libtool-bin
+
+      - name: Cache dependencies
+        id: cache-deps
+        uses: actions/cache@v4
+        env:
+          cache-name: cache-deps
+        with:
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-el9.x86_64-${{ hashFiles('deps/init/oceanbase.el9.x86_64.deps') }}
+          path: deps/3rd
+
+      - name: Build the base ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
+          git checkout "origin/$BASE_REF" -- src/
+          ./build.sh release --init
+          cd build_release
+          make -j4
+          test -x src/observer/seekdb
+          cp src/observer/seekdb "$GITHUB_WORKSPACE/seekdb_base"
+          cd "$GITHUB_WORKSPACE"
+          git checkout "origin/$CANDIDATE_REF" -- src/
+
+      - name: Build the candidate ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd build_release
+          make -j4
+          test -x src/observer/seekdb
+          cp src/observer/seekdb "$GITHUB_WORKSPACE/seekdb_candidate"
+          cd "$GITHUB_WORKSPACE"
+          git checkout "origin/$CANDIDATE_REF" -- src/
+
+      - name: Benchmark both binaries alternately
+        shell: bash
+        run: |
+          set -euo pipefail
+          CLIENT="$GITHUB_WORKSPACE/deps/3rd/u01/obclient/bin/obclient"
+          chmod +x "$CLIENT"
+          export MYSQL="$CLIENT -h127.0.0.1 -P$SEEKDB_PORT -uroot -N -s --default-character-set=utf8mb4"
+          export MYSQL_VERBOSE="$CLIENT -h127.0.0.1 -P$SEEKDB_PORT -uroot --default-character-set=utf8mb4"
+          mkdir -p "$GITHUB_WORKSPACE/reports"
+          for round in $(seq 1 "$ROUNDS"); do
+            for variant in base candidate; do
+              echo "===== round $round, $variant ====="
+              python3 .github/script/seekdb/sdb.py destroy --base-dir "$RUN_DIR" || true
+              rm -rf "$RUN_DIR"
+              python3 .github/script/seekdb/sdb.py start \
+                --binary "$GITHUB_WORKSPACE/seekdb_$variant" \
+                --base-dir "$RUN_DIR" \
+                --port "$SEEKDB_PORT" \
+                --nodaemon
+              python3 .github/script/seekdb/sdb.py wait-ready \
+                --client "$CLIENT" \
+                --base-dir "$RUN_DIR" \
+                --host 127.0.0.1 \
+                --port "$SEEKDB_PORT" \
+                --user root
+              export OUTPUT="$GITHUB_WORKSPACE/reports/${variant}_${round}.txt"
+              export LABEL="${variant}_${round}"
+              ROWS="${ROWS:-20000}"
+              export ROWS
+              bash tools/benchmark/fts_large_bench.sh
+              cat "$OUTPUT"
+            done
+          done
+          python3 .github/script/seekdb/sdb.py destroy --base-dir "$RUN_DIR" || true
+
+      - name: Score every report against the fixed baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          for report in reports/*.txt; do
+            echo "===== $report"
+            python3 tools/benchmark/fts_large_bench_score.py "$report" --json || true
+          done
+
+      - name: Upload every report
+        uses: actions/upload-artifact@v4
+        with:
+          name: fts-ab-reports
+          path: reports/
+
+      - name: Stop seekdb
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/script/seekdb/sdb.py destroy --base-dir "$RUN_DIR" || true
