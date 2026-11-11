@@ -113,6 +113,18 @@ int ObIKArbitrator::output_result(TokenizeContext &ctx)
 
   int64_t char_len = 0;
   ObIKTokenChain *chain = nullptr;
+  int64_t chain_idx = 0;
+  // The chains are added in the order of their offsets.  The sort is only a
+  // safety net for the case that a chain replaces another one.
+  for (int64_t i = 1; OB_SUCC(ret) && i < chains_.count(); ++i) {
+    ObIKTokenChain *cur_chain = chains_.at(i);
+    int64_t j = i - 1;
+    while (j >= 0 && chains_.at(j)->min_offset() > cur_chain->min_offset()) {
+      chains_.at(j + 1) = chains_.at(j);
+      --j;
+    }
+    chains_.at(j + 1) = cur_chain;
+  }
   for (int64_t current = 0; OB_SUCC(ret) && current < ctx.fulltext_len();) {
     ObFTCharUtil::CharType type;
     // maybe not so good to keep single, check it later
@@ -126,9 +138,9 @@ int ObIKArbitrator::output_result(TokenizeContext &ctx)
                                                          type))) {
     } else if (ObFTCharUtil::CharType::USELESS == type) {
       current += char_len; // skip useless char
-    } else if (OB_FAIL(chains_.get_refactored(current, chain)) && OB_HASH_NOT_EXIST != ret) {
-    } else if (OB_HASH_NOT_EXIST == ret) {
-      ret = OB_SUCCESS;
+    } else if (OB_FAIL(find_chain_at(current, chain_idx, chain))) {
+    } else if (nullptr == chain) {
+      // no chain starts at this character
       if (!keep_single()) {
         // skip single word
       } else {
@@ -301,15 +313,29 @@ int ObIKArbitrator::remove_conflict(const ObIKToken &token, ObIKTokenChain *opti
 int ObIKArbitrator::prepare(TokenizeContext &ctx)
 {
   int ret = OB_SUCCESS;
+  UNUSED(ctx);
 
-  int cal_bucket_num = MAX(ctx.fulltext_len() / 100, 10);
-  cal_bucket_num = MIN(cal_bucket_num, 100);
-  if (OB_FAIL(chains_.create(cal_bucket_num, ObMemAttr("IK ARBITRATE")))) {
+  chains_.reset();
+  return ret;
+}
+
+int ObIKArbitrator::find_chain_at(int64_t offset, int64_t &chain_idx, ObIKTokenChain *&chain)
+{
+  int ret = OB_SUCCESS;
+  chain = nullptr;
+  // The chains are ordered by their offset and the text is walked from its
+  // first character to its last one, so the chain that starts at the given
+  // offset is found by moving the cursor forward.
+  while (chain_idx < chains_.count() && chains_.at(chain_idx)->min_offset() < offset) {
+    ++chain_idx;
+  }
+  if (chain_idx < chains_.count() && chains_.at(chain_idx)->min_offset() == offset) {
+    chain = chains_.at(chain_idx);
   }
   return ret;
 }
 
-ObIKArbitrator::ObIKArbitrator() : alloc_(lib::ObMemAttr("IK Arbitrator")) {}
+ObIKArbitrator::ObIKArbitrator() : alloc_(lib::ObMemAttr("IK Arbitrator")), chains_(&alloc_) {}
 
 int ObIKArbitrator::add_chain(ObIKTokenChain *chain)
 {
@@ -318,14 +344,26 @@ int ObIKArbitrator::add_chain(ObIKTokenChain *chain)
     ret = OB_INVALID_ARGUMENT;
   } else if (chain->list().is_empty()) {
     // no need to add empty chain
-  } else if (OB_FAIL(chains_.set_refactored(chain->min_offset(), chain))) {
+  } else {
+    // A chain with the same offset replaces the older one, the same way the
+    // hash map did.
+    bool replaced = false;
+    for (int64_t i = chains_.count() - 1; OB_SUCC(ret) && !replaced && i >= 0; --i) {
+      if (chains_.at(i) == chain || chains_.at(i)->min_offset() == chain->min_offset()) {
+        chains_.at(i) = chain;
+        replaced = true;
+      }
+    }
+    if (!replaced && OB_FAIL(chains_.push_back(chain))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    }
   }
   return ret;
 }
 
 ObIKArbitrator::~ObIKArbitrator()
 {
-  chains_.destroy();
+  chains_.reset();
   alloc_.reset();
 }
 } // namespace storage
