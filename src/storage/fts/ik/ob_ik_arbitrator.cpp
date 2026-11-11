@@ -116,7 +116,7 @@ int ObIKArbitrator::output_result(TokenizeContext &ctx)
   int64_t chain_idx = 0;
   // The chains are added in the order of their offsets.  The sort is only a
   // safety net for the case that a chain replaces another one.
-  for (int64_t i = 1; OB_SUCC(ret) && i < chains_.count(); ++i) {
+  for (int64_t i = 1; OB_SUCC(ret) && i < chains_.size(); ++i) {
     ObIKTokenChain *cur_chain = chains_.at(i);
     int64_t j = i - 1;
     while (j >= 0 && chains_.at(j)->min_offset() > cur_chain->min_offset()) {
@@ -326,10 +326,10 @@ int ObIKArbitrator::find_chain_at(int64_t offset, int64_t &chain_idx, ObIKTokenC
   // The chains are ordered by their offset and the text is walked from its
   // first character to its last one, so the chain that starts at the given
   // offset is found by moving the cursor forward.
-  while (chain_idx < chains_.count() && chains_.at(chain_idx)->min_offset() < offset) {
+  while (chain_idx < chains_.size() && chains_.at(chain_idx)->min_offset() < offset) {
     ++chain_idx;
   }
-  if (chain_idx < chains_.count() && chains_.at(chain_idx)->min_offset() == offset) {
+  if (chain_idx < chains_.size() && chains_.at(chain_idx)->min_offset() == offset) {
     chain = chains_.at(chain_idx);
   }
   return ret;
@@ -348,7 +348,7 @@ int ObIKArbitrator::add_chain(ObIKTokenChain *chain)
     // A chain with the same offset replaces the older one, the same way the
     // hash map did.
     bool replaced = false;
-    for (int64_t i = chains_.count() - 1; OB_SUCC(ret) && !replaced && i >= 0; --i) {
+    for (int64_t i = chains_.size() - 1; OB_SUCC(ret) && !replaced && i >= 0; --i) {
       if (chains_.at(i) == chain || chains_.at(i)->min_offset() == chain->min_offset()) {
         chains_.at(i) = chain;
         replaced = true;
