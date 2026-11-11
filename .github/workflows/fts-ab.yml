@@ -29,7 +29,12 @@ env:
   RUN_DIR: '${{ github.workspace }}/seekdb_run'
   BASE_REF: '2026-competition'
   CANDIDATE_REF: 'perf/fts-opt'
-  ROUNDS: '2'
+  # How many times each binary is benchmarked.  This is NOT the ROUNDS of
+  # fts_large_bench.sh: that one is the number of TOKENIZE rounds and it has
+  # to stay at the default 3000, otherwise the report does not match the
+  # configuration of the checked in baseline and the official scoring script
+  # rejects it.
+  AB_ROUNDS: '4'
 
 jobs:
   fts-ab:
@@ -107,7 +112,7 @@ jobs:
           export MYSQL="$CLIENT -h127.0.0.1 -P$SEEKDB_PORT -uroot -N -s --default-character-set=utf8mb4"
           export MYSQL_VERBOSE="$CLIENT -h127.0.0.1 -P$SEEKDB_PORT -uroot --default-character-set=utf8mb4"
           mkdir -p "$GITHUB_WORKSPACE/reports"
-          for round in $(seq 1 "$ROUNDS"); do
+          for round in $(seq 1 "$AB_ROUNDS"); do
             for variant in base candidate; do
               echo "===== round $round, $variant ====="
               python3 .github/script/seekdb/sdb.py destroy --base-dir "$RUN_DIR" || true
@@ -140,6 +145,18 @@ jobs:
           for report in reports/*.txt; do
             echo "===== $report"
             python3 tools/benchmark/fts_large_bench_score.py "$report" --json || true
+          done
+
+      - name: Compare the candidate with the base on this machine
+        shell: bash
+        run: |
+          set -euo pipefail
+          for round in $(seq 1 "$AB_ROUNDS"); do
+            if [[ -f "reports/base_${round}.txt" && -f "reports/candidate_${round}.txt" ]]; then
+              echo "===== round $round"
+              python3 .github/script/seekdb/fts_ab_compare.py \
+                "reports/base_${round}.txt" "reports/candidate_${round}.txt"
+            fi
           done
 
       - name: Upload every report
