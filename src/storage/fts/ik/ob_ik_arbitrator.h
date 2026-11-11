@@ -18,7 +18,7 @@
 #define _OCEANBASE_STORAGE_FTS_IK_OB_IK_ARBITRATOR_H_
 
 #include "lib/allocator/page_arena.h"
-#include "lib/hash/ob_hashmap.h"
+#include "lib/container/ob_vector.h"
 #include "lib/utility/ob_macro_utils.h"
 #include "storage/fts/ik/ob_ik_token.h"
 
@@ -59,9 +59,21 @@ private:
 
   bool keep_single() const { return true; }
 
+  /**
+   * Find the chain that starts at the given offset.
+   *
+   * The chains are ordered by their offset and the text is walked from its
+   * first character to its last one, so the chain is found by moving the
+   * cursor forward instead of hashing the offset for every character.
+   */
+  int find_chain_at(int64_t offset, int64_t &chain_idx, ObIKTokenChain *&chain);
+
 private:
   ObArenaAllocator alloc_;
-  hash::ObHashMap<int64_t, ObIKTokenChain *> chains_;
+  // The chains of the text, ordered by their offset.  A hash map was used
+  // before, but the arbitration looks up a chain for every character of the
+  // text and every lookup hashed the offset and locked a bucket of the map.
+  ObVector<ObIKTokenChain *, ObArenaAllocator> chains_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObIKArbitrator);
