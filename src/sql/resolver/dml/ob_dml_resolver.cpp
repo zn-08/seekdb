@@ -41,6 +41,9 @@
 #include "sql/resolver/dcl/ob_dcl_resolver.h"
 #include "sql/resolver/ddl/ob_ddl_resolver.h"
 #include "sql/hybrid_search/ob_hybrid_search_executor.h"
+#include "sql/engine/basic/file_sql_csv_reader.h"
+#include <limits.h>
+#include <string>
 
 namespace oceanbase
 {
@@ -7656,6 +7659,76 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
   CK (OB_NOT_NULL(table_expr = table_item.function_table_expr_));
   OZ (table_expr->deduce_type(session_info_));
   if (OB_FAIL(ret)) { // do nothing ...
+  } else if (T_FUN_SYS_READ_CSV == table_expr->get_expr_type()) {
+    // Discover the complete schema without retaining file rows in memory.
+    // Only a literal path is accepted because output column types must be
+    // known while resolving the query.
+    if (table_expr->get_param_count() != 1
+        || OB_ISNULL(table_expr->get_param_expr(0))
+        || !table_expr->get_param_expr(0)->is_const_raw_expr()) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "read_csv requires a constant file path");
+    } else {
+      const ObObj &path_obj = static_cast<ObConstRawExpr *>(table_expr->get_param_expr(0))->get_value();
+      if (!path_obj.is_string_type()) {
+        ret = OB_INVALID_ARGUMENT;
+      } else {
+        const ObString path_value = path_obj.get_string();
+        const std::string path(path_value.ptr(), path_value.length());
+        char actual_path[PATH_MAX] = {0};
+        ObString secure_file_priv;
+        if (path.empty() || path.find('\0') != std::string::npos) {
+          ret = OB_INVALID_ARGUMENT;
+#ifdef _WIN32
+        } else if (OB_ISNULL(::_fullpath(actual_path, path.c_str(), sizeof(actual_path)))) {
+#else
+        } else if (OB_ISNULL(::realpath(path.c_str(), actual_path))) {
+#endif
+          ret = OB_FILE_NOT_EXIST;
+        } else if (OB_FAIL(session_info_->get_secure_file_priv(secure_file_priv))) {
+        } else if (OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, ObString(actual_path)))) {
+        } else {
+          FileSQLCsvReader reader;
+          if (!reader.open(actual_path)) {
+            ret = OB_INVALID_ARGUMENT;
+            LOG_WARN("failed to infer CSV schema", K(ret), "reason", reader.error().c_str(),
+                     "row", reader.row_number());
+          }
+          for (size_t i = 0; OB_SUCC(ret) && i < reader.columns().size(); ++i) {
+            const FileSQLCsvReader::Column &column = reader.columns()[i];
+            ObObjMeta meta;
+            switch (column.type) {
+              case FileSQLCsvReader::Type::BOOLEAN: meta.set_tinyint(); break;
+              case FileSQLCsvReader::Type::BIGINT: meta.set_int(); break;
+              case FileSQLCsvReader::Type::DOUBLE: meta.set_double(); break;
+              case FileSQLCsvReader::Type::DATE: meta.set_date(); break;
+              case FileSQLCsvReader::Type::DATETIME: meta.set_datetime(); break;
+              default:
+                meta.set_varchar();
+                meta.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+                meta.set_collation_level(CS_LEVEL_IMPLICIT);
+                break;
+            }
+            ObAccuracy accuracy = ObAccuracy::DDL_DEFAULT_ACCURACY[meta.get_type()];
+            if (meta.get_type() == ObVarcharType) {
+              accuracy.set_length(65535);
+            }
+            ObString column_name;
+            ColumnItem *file_col = NULL;
+            if (OB_FAIL(ob_write_string(*allocator_, ObString(column.name.length(), column.name.c_str()),
+                                        column_name))) {
+            } else if (OB_FAIL(resolve_function_table_column_item(table_item, meta, accuracy,
+                                                                   column_name,
+                                                                   OB_APP_MIN_COLUMN_ID + i,
+                                                                   file_col))) {
+            } else if (OB_ISNULL(file_col)) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (OB_FAIL(col_items.push_back(*file_col))) {
+            }
+          }
+        }
+      }
+    }
   } else if (!ObResolverUtils::is_expr_can_be_used_in_table_function(*table_expr)) {
     ret = OB_NOT_SUPPORTED;
     LOG_USER_ERROR(OB_NOT_SUPPORTED, "access rows from a non-nested table item");

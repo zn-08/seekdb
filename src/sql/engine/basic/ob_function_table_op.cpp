@@ -19,6 +19,12 @@
 #include "sql/engine/basic/ob_function_table_op.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
+#include "sql/engine/expr/ob_obj_cast_runtime.h"
+#include "sql/resolver/ob_resolver_utils.h"
+#include "sql/session/ob_basic_session_info.h"
+#include <limits.h>
+#include <string>
+#include <vector>
 
 
 namespace oceanbase
@@ -36,6 +42,9 @@ int ObFunctionTableOp::inner_open()
   already_calc_ = false;
   if (OB_ISNULL(MY_SPEC.value_expr_)) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (T_FUN_SYS_READ_CSV == MY_SPEC.value_expr_->type_) {
+    next_row_func_ = &ObFunctionTableOp::inner_get_next_row_csv;
+    ret = inner_open_csv();
   } else if (ObExtendType == MY_SPEC.value_expr_->datum_meta_.type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_udf;
   } else {
@@ -48,6 +57,12 @@ int ObFunctionTableOp::inner_rescan()
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(ObOperator::inner_rescan())) {
+  } else if (OB_NOT_NULL(MY_SPEC.value_expr_)
+             && T_FUN_SYS_READ_CSV == MY_SPEC.value_expr_->type_) {
+    if (!csv_reader_.rescan()) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("CSV file changed before rescan", K(ret), "reason", csv_reader_.error().c_str());
+    }
   } else {
     node_idx_ = 0;
     if (MY_SPEC.has_correlated_expr_) {
@@ -67,6 +82,93 @@ int ObFunctionTableOp::inner_close()
   row_count_ = 0;
   col_count_ = 0;
   value_table_ = NULL;
+  csv_reader_.close();
+  return ret;
+}
+
+int ObFunctionTableOp::inner_open_csv()
+{
+  int ret = OB_SUCCESS;
+  ObDatum *path_datum = NULL;
+  ObString secure_file_priv;
+  char actual_path[PATH_MAX] = {0};
+  if (MY_SPEC.value_expr_->arg_cnt_ != 1 || OB_ISNULL(MY_SPEC.value_expr_->args_[0])) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(MY_SPEC.value_expr_->args_[0]->eval(eval_ctx_, path_datum))) {
+  } else if (OB_ISNULL(path_datum) || path_datum->is_null()) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    const ObString path_value = path_datum->get_string();
+    const std::string path(path_value.ptr(), path_value.length());
+    if (path.empty() || path.find('\0') != std::string::npos) {
+      ret = OB_INVALID_ARGUMENT;
+#ifdef _WIN32
+    } else if (OB_ISNULL(::_fullpath(actual_path, path.c_str(), sizeof(actual_path)))) {
+#else
+    } else if (OB_ISNULL(::realpath(path.c_str(), actual_path))) {
+#endif
+      ret = OB_FILE_NOT_EXIST;
+    } else if (OB_ISNULL(GET_MY_SESSION(ctx_))) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(GET_MY_SESSION(ctx_)->get_secure_file_priv(secure_file_priv))) {
+    } else if (OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, ObString(actual_path)))) {
+    } else if (!csv_reader_.open(actual_path)) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("failed to open CSV table", K(ret), "reason", csv_reader_.error().c_str());
+    } else if (csv_reader_.columns().size() != MY_SPEC.column_exprs_.count()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("CSV schema changed after query resolution", K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::inner_get_next_row_csv()
+{
+  int ret = OB_SUCCESS;
+  clear_evaluated_flag();
+  std::vector<std::string> row;
+  const FileSQLCsvReader::Status status = csv_reader_.next(row);
+  if (status == FileSQLCsvReader::Status::END) {
+    ret = OB_ITER_END;
+  } else if (status == FileSQLCsvReader::Status::ERROR) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("failed to read CSV row", K(ret), "reason", csv_reader_.error().c_str(),
+             "row", csv_reader_.row_number());
+  } else if (row.size() != MY_SPEC.column_exprs_.count()) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    const ObDataTypeCastParams dtc_params = ObBasicSessionInfo::create_dtc_params(GET_MY_SESSION(ctx_));
+    for (size_t i = 0; OB_SUCC(ret) && i < row.size(); ++i) {
+      ObExpr *column_expr = MY_SPEC.column_exprs_.at(i);
+      if (OB_ISNULL(column_expr)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        ObDatum &datum = column_expr->locate_datum_for_write(eval_ctx_);
+        if (row[i].empty()) {
+          datum.set_null();
+        } else {
+          ObObj source;
+          ObObj converted;
+          source.set_varchar(ObString(static_cast<int32_t>(row[i].size()), row[i].data()));
+          source.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+          ObAccuracy accuracy = ObAccuracy::DDL_DEFAULT_ACCURACY2[0][column_expr->obj_meta_.get_type()];
+          ObCastCtx cast_ctx(&ctx_.get_allocator(), &dtc_params, CM_NONE,
+                             column_expr->obj_meta_.get_collation_type(), &accuracy);
+          ObSqlObjCastRuntime cast_runtime(&ctx_);
+          cast_ctx.runtime_ = &cast_runtime;
+          if (OB_FAIL(ObObjCaster::to_type(column_expr->obj_meta_.get_type(),
+                                         column_expr->obj_meta_.get_collation_type(),
+                                         cast_ctx, source, converted))) {
+          } else if (OB_FAIL(datum.from_obj(converted, column_expr->obj_datum_map_))) {
+          }
+        }
+        if (OB_SUCC(ret)) {
+          column_expr->set_evaluated_projected(eval_ctx_);
+        }
+      }
+    }
+  }
   return ret;
 }
 
