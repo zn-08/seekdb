@@ -3938,6 +3938,30 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
   if (OB_SUCC(ret) && (OB_ISNULL(stmt) || OB_ISNULL(allocator_))) {
     ret = OB_NOT_INIT;
   }
+  // A file table function must report the feature gate before function name
+  // resolution. This also prevents file access while the gate is disabled.
+  if (OB_SUCC(ret) && T_FUN_SYS == parse_tree.children_[0]->type_
+      && parse_tree.children_[0]->num_child_ > 0
+      && OB_NOT_NULL(parse_tree.children_[0]->children_[0])) {
+    const ParseNode *name_node = parse_tree.children_[0]->children_[0];
+    const ObString function_name(name_node->str_len_, name_node->str_value_);
+    if (0 == function_name.case_compare("read_csv")
+        || 0 == function_name.case_compare("read_json")
+        || 0 == function_name.case_compare("read_ndjson")
+        || 0 == function_name.case_compare("read_parquet")
+        || 0 == function_name.case_compare("glob")) {
+      int64_t file_sql_enabled = 0;
+      if (OB_ISNULL(session_info_)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(session_info_->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL,
+                                                         file_sql_enabled))) {
+        LOG_WARN("failed to read enable_file_sql", K(ret));
+      } else if (0 == file_sql_enabled) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "file SQL is disabled");
+      }
+    }
+  }
   if (OB_SUCC(ret)) {
     OX (params_.is_resolve_table_function_expr_ = true);
     OZ (resolve_sql_expr(*(parse_tree.children_[0]), function_table_expr));
