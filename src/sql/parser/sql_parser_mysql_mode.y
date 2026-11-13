@@ -10858,6 +10858,26 @@ tbl_name
   malloc_non_terminal_node(function, result->malloc_pool_, T_FUN_SYS, 2, $1, params);
   malloc_non_terminal_node($$, result->malloc_pool_, T_TABLE_COLLECTION_EXPRESSION, 2, function, NULL);
 }
+| function_name '(' opt_expr_as_list ')' relation_name
+{
+  ParseNode *params = NULL;
+  ParseNode *function = NULL;
+  if (NULL != $3) {
+    merge_nodes(params, result, T_EXPR_LIST, $3);
+  }
+  malloc_non_terminal_node(function, result->malloc_pool_, T_FUN_SYS, 2, $1, params);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_TABLE_COLLECTION_EXPRESSION, 2, function, $5);
+}
+| function_name '(' opt_expr_as_list ')' AS relation_name
+{
+  ParseNode *params = NULL;
+  ParseNode *function = NULL;
+  if (NULL != $3) {
+    merge_nodes(params, result, T_EXPR_LIST, $3);
+  }
+  malloc_non_terminal_node(function, result->malloc_pool_, T_FUN_SYS, 2, $1, params);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_TABLE_COLLECTION_EXPRESSION, 2, function, $6);
+}
 ;
 
 tbl_name:
