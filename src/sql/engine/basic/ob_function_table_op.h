@@ -66,8 +66,10 @@ private:
   int inner_get_next_row_sys_func();
   int inner_get_next_row_csv();
   int inner_get_next_row_json();
+  int inner_get_next_row_glob();
   int inner_open_csv();
   int inner_open_json();
+  int inner_open_glob();
   int write_file_row(const std::vector<std::string> &row, const std::vector<bool> *nulls);
   int get_current_result(common::ObObj &result);
   int64_t node_idx_;
@@ -78,6 +80,8 @@ private:
   pl::ObPLCollection *value_table_;
   FileSQLCsvReader csv_reader_;
   FileSQLJsonlReader json_reader_;
+  std::vector<std::string> glob_paths_;
+  size_t glob_index_ = 0;
   int (ObFunctionTableOp::*next_row_func_)();
 };
 

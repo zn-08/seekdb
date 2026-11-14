@@ -3959,7 +3959,8 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
     file_function_name = function_name;
     is_file_reader = 0 == function_name.case_compare("read_csv")
                      || 0 == function_name.case_compare("read_json")
-                     || 0 == function_name.case_compare("read_ndjson");
+                     || 0 == function_name.case_compare("read_ndjson")
+                     || 0 == function_name.case_compare("glob");
     if (0 == function_name.case_compare("read_csv")
         || 0 == function_name.case_compare("read_json")
         || 0 == function_name.case_compare("read_ndjson")
@@ -7736,6 +7737,28 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
   CK (OB_NOT_NULL(table_expr = table_item.function_table_expr_));
   OZ (table_expr->deduce_type(session_info_));
   if (OB_FAIL(ret)) { // do nothing ...
+  } else if (T_FUN_SYS_FILE_GLOB == table_expr->get_expr_type()) {
+    if (table_expr->get_param_count() != 1
+        || OB_ISNULL(table_expr->get_param_expr(0))
+        || !table_expr->get_param_expr(0)->is_const_raw_expr()) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "glob requires a constant file pattern");
+    } else {
+      ObObjMeta meta;
+      meta.set_varchar();
+      meta.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+      meta.set_collation_level(CS_LEVEL_IMPLICIT);
+      ObAccuracy accuracy = ObAccuracy::DDL_DEFAULT_ACCURACY[ObVarcharType];
+      accuracy.set_length(4096);
+      ColumnItem *file_col = NULL;
+      if (OB_FAIL(resolve_function_table_column_item(table_item, meta, accuracy,
+                                                     ObString("file"), OB_APP_MIN_COLUMN_ID,
+                                                     file_col))) {
+      } else if (OB_ISNULL(file_col)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(col_items.push_back(*file_col))) {
+      }
+    }
   } else if (T_FUN_SYS_READ_CSV == table_expr->get_expr_type()
              || T_FUN_SYS_READ_JSON == table_expr->get_expr_type()
              || T_FUN_SYS_READ_NDJSON == table_expr->get_expr_type()) {
@@ -7751,6 +7774,7 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
       const ObObj &path_obj = static_cast<ObConstRawExpr *>(table_expr->get_param_expr(0))->get_value();
       if (!path_obj.is_string_type()) {
         ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "file SQL path type");
       } else {
         const ObString path_value = path_obj.get_string();
         const std::string path(path_value.ptr(), path_value.length());
@@ -7758,6 +7782,7 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
         ObString secure_file_priv;
         if (path.empty() || path.find('\0') != std::string::npos) {
           ret = OB_INVALID_ARGUMENT;
+          LOG_USER_ERROR(OB_INVALID_ARGUMENT, "file SQL path");
 #ifdef _WIN32
         } else if (OB_ISNULL(::_fullpath(actual_path, path.c_str(), sizeof(actual_path)))) {
 #else
@@ -7777,6 +7802,9 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
           }
           if (OB_ISNULL(columns)) {
             ret = OB_INVALID_ARGUMENT;
+            LOG_USER_ERROR(OB_INVALID_ARGUMENT,
+                           T_FUN_SYS_READ_CSV == table_expr->get_expr_type()
+                               ? csv_reader.error().c_str() : json_reader.error().c_str());
             LOG_WARN("failed to infer file schema", K(ret),
                      "csv_reason", csv_reader.error().c_str(),
                      "json_reason", json_reader.error().c_str());
@@ -7832,7 +7860,8 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
   if (OB_SUCC(ret)
       && T_FUN_SYS_READ_CSV != table_expr->get_expr_type()
       && T_FUN_SYS_READ_JSON != table_expr->get_expr_type()
-      && T_FUN_SYS_READ_NDJSON != table_expr->get_expr_type()) {
+      && T_FUN_SYS_READ_NDJSON != table_expr->get_expr_type()
+      && T_FUN_SYS_FILE_GLOB != table_expr->get_expr_type()) {
     CK (OB_NOT_NULL(col_item));
     OZ (col_items.push_back(*col_item));
   }

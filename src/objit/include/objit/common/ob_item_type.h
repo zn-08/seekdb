@@ -919,6 +919,7 @@ typedef enum ObItemType
   T_FUN_SYS_READ_CSV = 2087,
   T_FUN_SYS_READ_JSON = 2088,
   T_FUN_SYS_READ_NDJSON = 2089,
+  T_FUN_SYS_FILE_GLOB = 2090,
   T_MAX_OP = 3000,
 
   //pseudo column, to mark the group iterator id

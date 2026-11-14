@@ -75,5 +75,13 @@ public:
   {}
 };
 
+class FileSQLGlobExpr : public FileSQLReadCsvExpr
+{
+public:
+  explicit FileSQLGlobExpr(common::ObIAllocator &alloc)
+      : FileSQLReadCsvExpr(alloc, T_FUN_SYS_FILE_GLOB, N_FILE_GLOB)
+  {}
+};
+
 } // namespace sql
 } // namespace oceanbase

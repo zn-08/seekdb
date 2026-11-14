@@ -22,7 +22,13 @@
 #include "sql/engine/expr/ob_obj_cast_runtime.h"
 #include "sql/resolver/ob_resolver_utils.h"
 #include "sql/session/ob_basic_session_info.h"
+#include <algorithm>
 #include <limits.h>
+#ifndef _WIN32
+#include <glob.h>
+#else
+#include <io.h>
+#endif
 #include <string>
 #include <vector>
 
@@ -50,6 +56,9 @@ int ObFunctionTableOp::inner_open()
              || T_FUN_SYS_READ_NDJSON == MY_SPEC.value_expr_->type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_json;
     ret = inner_open_json();
+  } else if (T_FUN_SYS_FILE_GLOB == MY_SPEC.value_expr_->type_) {
+    next_row_func_ = &ObFunctionTableOp::inner_get_next_row_glob;
+    ret = inner_open_glob();
   } else if (ObExtendType == MY_SPEC.value_expr_->datum_meta_.type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_udf;
   } else {
@@ -75,6 +84,9 @@ int ObFunctionTableOp::inner_rescan()
       ret = OB_INVALID_ARGUMENT;
       LOG_WARN("JSONL file changed before rescan", K(ret), "reason", json_reader_.error().c_str());
     }
+  } else if (OB_NOT_NULL(MY_SPEC.value_expr_)
+             && T_FUN_SYS_FILE_GLOB == MY_SPEC.value_expr_->type_) {
+    glob_index_ = 0;
   } else {
     node_idx_ = 0;
     if (MY_SPEC.has_correlated_expr_) {
@@ -96,6 +108,8 @@ int ObFunctionTableOp::inner_close()
   value_table_ = NULL;
   csv_reader_.close();
   json_reader_.close();
+  glob_paths_.clear();
+  glob_index_ = 0;
   return ret;
 }
 
@@ -107,14 +121,17 @@ int ObFunctionTableOp::inner_open_csv()
   char actual_path[PATH_MAX] = {0};
   if (MY_SPEC.value_expr_->arg_cnt_ != 1 || OB_ISNULL(MY_SPEC.value_expr_->args_[0])) {
     ret = OB_INVALID_ARGUMENT;
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "read_csv argument count");
   } else if (OB_FAIL(MY_SPEC.value_expr_->args_[0]->eval(eval_ctx_, path_datum))) {
   } else if (OB_ISNULL(path_datum) || path_datum->is_null()) {
     ret = OB_INVALID_ARGUMENT;
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "read_csv null path");
   } else {
     const ObString path_value = path_datum->get_string();
     const std::string path(path_value.ptr(), path_value.length());
     if (path.empty() || path.find('\0') != std::string::npos) {
       ret = OB_INVALID_ARGUMENT;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "read_csv path");
 #ifdef _WIN32
     } else if (OB_ISNULL(::_fullpath(actual_path, path.c_str(), sizeof(actual_path)))) {
 #else
@@ -127,6 +144,7 @@ int ObFunctionTableOp::inner_open_csv()
     } else if (OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, ObString(actual_path)))) {
     } else if (!csv_reader_.open(actual_path)) {
       ret = OB_INVALID_ARGUMENT;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, csv_reader_.error().c_str());
       LOG_WARN("failed to open CSV table", K(ret), "reason", csv_reader_.error().c_str());
     } else if (MY_SPEC.column_indexes_.count() != MY_SPEC.column_exprs_.count()) {
       ret = OB_ERR_UNEXPECTED;
@@ -173,6 +191,98 @@ int ObFunctionTableOp::inner_open_json()
   return ret;
 }
 
+int ObFunctionTableOp::inner_open_glob()
+{
+  int ret = OB_SUCCESS;
+  ObDatum *pattern_datum = NULL;
+  ObString secure_file_priv;
+  if (MY_SPEC.value_expr_->arg_cnt_ != 1 || OB_ISNULL(MY_SPEC.value_expr_->args_[0])) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(MY_SPEC.value_expr_->args_[0]->eval(eval_ctx_, pattern_datum))) {
+  } else if (OB_ISNULL(pattern_datum) || pattern_datum->is_null()) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_ISNULL(GET_MY_SESSION(ctx_))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(GET_MY_SESSION(ctx_)->get_secure_file_priv(secure_file_priv))) {
+  } else {
+    const ObString text = pattern_datum->get_string();
+    const std::string pattern(text.ptr(), text.length());
+    if (pattern.empty() || pattern.find('\0') != std::string::npos) {
+      ret = OB_INVALID_ARGUMENT;
+    } else {
+      std::vector<std::string> matches;
+#ifdef _WIN32
+      struct _finddata_t data;
+      const intptr_t handle = ::_findfirst(pattern.c_str(), &data);
+      if (handle != -1) {
+        const size_t separator = pattern.find_last_of("/\\");
+        const std::string directory = separator == std::string::npos
+            ? std::string() : pattern.substr(0, separator + 1);
+        do {
+          if (0 == (data.attrib & _A_SUBDIR)) {
+            matches.push_back(directory + data.name);
+          }
+        } while (matches.size() <= 100000 && 0 == ::_findnext(handle, &data));
+        ::_findclose(handle);
+      }
+#else
+      glob_t found = {};
+      const int glob_ret = ::glob(pattern.c_str(), 0, NULL, &found);
+      if (glob_ret != 0 && glob_ret != GLOB_NOMATCH) {
+        ret = OB_INVALID_ARGUMENT;
+      } else {
+        for (size_t i = 0; i < found.gl_pathc && i <= 100000; ++i) {
+          matches.emplace_back(found.gl_pathv[i]);
+        }
+        if (found.gl_pathc > 100000) ret = OB_INVALID_ARGUMENT;
+      }
+      ::globfree(&found);
+#endif
+      if (matches.size() > 100000) ret = OB_INVALID_ARGUMENT;
+      for (const std::string &match : matches) {
+        if (OB_FAIL(ret)) break;
+        char actual_path[PATH_MAX] = {0};
+#ifdef _WIN32
+        if (OB_ISNULL(::_fullpath(actual_path, match.c_str(), sizeof(actual_path)))) {
+#else
+        if (OB_ISNULL(::realpath(match.c_str(), actual_path))) {
+#endif
+          ret = OB_FILE_NOT_EXIST;
+        } else if (OB_FAIL(ObResolverUtils::check_secure_path(
+                       secure_file_priv, ObString(actual_path)))) {
+        } else {
+          struct stat file_info;
+          if (0 == ::stat(actual_path, &file_info)
+#ifndef _WIN32
+              && S_ISREG(file_info.st_mode)
+#else
+              && (file_info.st_mode & _S_IFREG)
+#endif
+              ) {
+            glob_paths_.emplace_back(actual_path);
+          }
+        }
+      }
+      std::sort(glob_paths_.begin(), glob_paths_.end());
+      glob_index_ = 0;
+    }
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::inner_get_next_row_glob()
+{
+  int ret = OB_SUCCESS;
+  clear_evaluated_flag();
+  if (glob_index_ >= glob_paths_.size()) {
+    ret = OB_ITER_END;
+  } else {
+    const std::vector<std::string> row{glob_paths_[glob_index_++]};
+    ret = write_file_row(row, NULL);
+  }
+  return ret;
+}
+
 int ObFunctionTableOp::inner_get_next_row_csv()
 {
   int ret = OB_SUCCESS;
@@ -187,6 +297,7 @@ int ObFunctionTableOp::inner_get_next_row_csv()
              "row", csv_reader_.row_number());
   } else if (row.size() != csv_reader_.columns().size()) {
     ret = OB_INVALID_ARGUMENT;
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "CSV row width");
   } else {
     ret = write_file_row(row, NULL);
   }
@@ -244,9 +355,14 @@ int ObFunctionTableOp::write_file_row(const std::vector<std::string> &row,
           ObObj source;
           ObObj converted;
           const bool boolean_column = column_expr->obj_meta_.get_type() == ObTinyIntType;
-          const std::string cast_value = boolean_column
-              ? (value == "true" ? "1" : value == "false" ? "0" : value)
+          std::string cast_value = boolean_column
+              ? (value == "true" || value == "TRUE" ? "1"
+                 : value == "false" || value == "FALSE" ? "0" : value)
               : value;
+          if (column_expr->obj_meta_.get_type() == ObDateTimeType
+              && cast_value.size() == 19 && cast_value[10] == 'T') {
+            cast_value[10] = ' ';
+          }
           source.set_varchar(ObString(static_cast<int32_t>(cast_value.size()), cast_value.data()));
           source.set_collation_type(CS_TYPE_UTF8MB4_BIN);
           ObAccuracy accuracy = ObAccuracy::DDL_DEFAULT_ACCURACY2[0][column_expr->obj_meta_.get_type()];
@@ -257,7 +373,19 @@ int ObFunctionTableOp::write_file_row(const std::vector<std::string> &row,
           if (OB_FAIL(ObObjCaster::to_type(column_expr->obj_meta_.get_type(),
                                          column_expr->obj_meta_.get_collation_type(),
                                          cast_ctx, source, converted))) {
+            if (OB_INVALID_ARGUMENT == ret) {
+              LOG_USER_ERROR(OB_INVALID_ARGUMENT, "file SQL value conversion");
+            }
           } else if (OB_FAIL(datum.from_obj(converted, column_expr->obj_datum_map_))) {
+          } else if (OBJ_DATUM_STRING == column_expr->obj_datum_map_
+                     && datum.len_ > 0) {
+            char *buffer = column_expr->get_str_res_mem(eval_ctx_, datum.len_);
+            if (OB_ISNULL(buffer)) {
+              ret = OB_ALLOCATE_MEMORY_FAILED;
+            } else {
+              MEMCPY(buffer, datum.ptr_, datum.len_);
+              datum.ptr_ = buffer;
+            }
           }
         }
         if (OB_SUCC(ret)) {

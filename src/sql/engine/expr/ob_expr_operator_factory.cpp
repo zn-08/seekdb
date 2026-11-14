@@ -1052,6 +1052,7 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(FileSQLReadCsvExpr);
     REG_OP(FileSQLReadJsonExpr);
     REG_OP(FileSQLReadNdjsonExpr);
+    REG_OP(FileSQLGlobExpr);
   }();
 }
 
