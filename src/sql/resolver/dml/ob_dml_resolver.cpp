@@ -7771,12 +7771,22 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
       ret = OB_NOT_SUPPORTED;
       LOG_USER_ERROR(OB_NOT_SUPPORTED, "read_csv requires a constant file path");
     } else {
-      const ObObj &path_obj = static_cast<ObConstRawExpr *>(table_expr->get_param_expr(0))->get_value();
-      if (!path_obj.is_string_type()) {
+      // SQL literal parameterization replaces a string constant with an
+      // unknown object whose value is held in the resolver's parameter store.
+      // Use that value while inferring the file schema at resolve time.
+      const ObObj *path_obj = &static_cast<ObConstRawExpr *>(
+          table_expr->get_param_expr(0))->get_value();
+      if (path_obj->is_unknown() && OB_NOT_NULL(params_.param_list_)) {
+        const int64_t param_idx = path_obj->get_unknown();
+        if (param_idx >= 0 && param_idx < params_.param_list_->count()) {
+          path_obj = &params_.param_list_->at(param_idx);
+        }
+      }
+      if (!path_obj->is_string_type()) {
         ret = OB_INVALID_ARGUMENT;
         LOG_USER_ERROR(OB_INVALID_ARGUMENT, "file SQL path type");
       } else {
-        const ObString path_value = path_obj.get_string();
+        const ObString path_value = path_obj->get_string();
         const std::string path(path_value.ptr(), path_value.length());
         char actual_path[PATH_MAX] = {0};
         ObString secure_file_priv;
