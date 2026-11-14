@@ -42,6 +42,7 @@
 #include "sql/resolver/ddl/ob_ddl_resolver.h"
 #include "sql/hybrid_search/ob_hybrid_search_executor.h"
 #include "sql/engine/basic/file_sql_csv_reader.h"
+#include "sql/engine/basic/file_sql_jsonl_reader.h"
 #include <limits.h>
 #include <string>
 
@@ -3935,6 +3936,13 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
   ObRawExpr *function_table_expr = NULL;
   TableItem *item = NULL;
   ObString alias_name;
+  ObString file_function_name;
+  bool is_file_reader = false;
+  ParseNode function_copy;
+  ParseNode params_copy;
+  ParseNode *only_path[1] = {NULL};
+  ParseNode *function_children[2] = {NULL, NULL};
+  const ParseNode *function_expr_node = parse_tree.children_[0];
   CK (OB_LIKELY(T_TABLE_COLLECTION_EXPRESSION == parse_tree.type_));
   CK (OB_LIKELY(2 == parse_tree.num_child_));
   CK (OB_NOT_NULL(parse_tree.children_[0]));
@@ -3948,6 +3956,10 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
       && OB_NOT_NULL(parse_tree.children_[0]->children_[0])) {
     const ParseNode *name_node = parse_tree.children_[0]->children_[0];
     const ObString function_name(name_node->str_len_, name_node->str_value_);
+    file_function_name = function_name;
+    is_file_reader = 0 == function_name.case_compare("read_csv")
+                     || 0 == function_name.case_compare("read_json")
+                     || 0 == function_name.case_compare("read_ndjson");
     if (0 == function_name.case_compare("read_csv")
         || 0 == function_name.case_compare("read_json")
         || 0 == function_name.case_compare("read_ndjson")
@@ -3965,9 +3977,74 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
       }
     }
   }
+  if (OB_SUCC(ret) && is_file_reader) {
+    const ParseNode *func = parse_tree.children_[0];
+    const ParseNode *args = func->num_child_ == 2 ? func->children_[1] : NULL;
+    if (OB_ISNULL(args) || T_EXPR_LIST != args->type_ || args->num_child_ < 1
+        || OB_ISNULL(args->children_[0])) {
+      ret = OB_ERR_PARSER_SYNTAX;
+    } else {
+      for (int32_t i = 1; OB_SUCC(ret) && i < args->num_child_; ++i) {
+        const ParseNode *option = args->children_[i];
+        if (OB_ISNULL(option) || T_OP_EQ != option->type_ || option->num_child_ != 2
+            || OB_ISNULL(option->children_[0]) || OB_ISNULL(option->children_[1])
+            || T_COLUMN_REF != option->children_[0]->type_
+            || OB_ISNULL(option->children_[0]->children_[2])) {
+          ret = OB_ERR_PARSER_SYNTAX;
+        } else {
+          const ParseNode *name_node = option->children_[0]->children_[2];
+          const ParseNode *value_node = option->children_[1];
+          const ObString name(name_node->str_len_, name_node->str_value_);
+          if (0 == name.case_compare("sample_size")) {
+            const bool minus_one = (T_INT == value_node->type_ && -1 == value_node->value_)
+                || (T_OP_NEG == value_node->type_ && value_node->num_child_ == 1
+                    && OB_NOT_NULL(value_node->children_[0])
+                    && T_INT == value_node->children_[0]->type_
+                    && 1 == value_node->children_[0]->value_);
+            if (!minus_one) {
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED, "sample_size only supports -1");
+            }
+          } else if (0 == name.case_compare("header")
+                     && 0 == file_function_name.case_compare("read_csv")) {
+            const bool enabled = (T_BOOL == value_node->type_ && 1 == value_node->value_)
+                || (T_COLUMN_REF == value_node->type_
+                    && OB_NOT_NULL(value_node->children_[2])
+                    && 0 == ObString(value_node->children_[2]->str_len_,
+                                     value_node->children_[2]->str_value_).case_compare("true"));
+            if (!enabled) {
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED, "header=false is not supported yet");
+            }
+          } else if (0 == name.case_compare("format")
+                     && 0 != file_function_name.case_compare("read_csv")) {
+            if (T_VARCHAR != value_node->type_
+                || 0 != ObString(value_node->str_len_, value_node->str_value_)
+                    .case_compare("newline_delimited")) {
+              ret = OB_ERR_PARSER_SYNTAX;
+            }
+          } else {
+            ret = OB_NOT_SUPPORTED;
+            LOG_USER_ERROR(OB_NOT_SUPPORTED, "file SQL option");
+          }
+        }
+      }
+      if (OB_SUCC(ret) && args->num_child_ > 1) {
+        function_copy = *func;
+        params_copy = *args;
+        only_path[0] = args->children_[0];
+        params_copy.children_ = only_path;
+        params_copy.num_child_ = 1;
+        function_children[0] = func->children_[0];
+        function_children[1] = &params_copy;
+        function_copy.children_ = function_children;
+        function_expr_node = &function_copy;
+      }
+    }
+  }
   if (OB_SUCC(ret)) {
     OX (params_.is_resolve_table_function_expr_ = true);
-    OZ (resolve_sql_expr(*(parse_tree.children_[0]), function_table_expr));
+    OZ (resolve_sql_expr(*function_expr_node, function_table_expr));
     OX (params_.is_resolve_table_function_expr_ = false);
     CK (OB_NOT_NULL(function_table_expr));
     OX (alias_node = parse_tree.children_[1]);
@@ -7659,7 +7736,9 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
   CK (OB_NOT_NULL(table_expr = table_item.function_table_expr_));
   OZ (table_expr->deduce_type(session_info_));
   if (OB_FAIL(ret)) { // do nothing ...
-  } else if (T_FUN_SYS_READ_CSV == table_expr->get_expr_type()) {
+  } else if (T_FUN_SYS_READ_CSV == table_expr->get_expr_type()
+             || T_FUN_SYS_READ_JSON == table_expr->get_expr_type()
+             || T_FUN_SYS_READ_NDJSON == table_expr->get_expr_type()) {
     // Discover the complete schema without retaining file rows in memory.
     // Only a literal path is accepted because output column types must be
     // known while resolving the query.
@@ -7688,14 +7767,22 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
         } else if (OB_FAIL(session_info_->get_secure_file_priv(secure_file_priv))) {
         } else if (OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, ObString(actual_path)))) {
         } else {
-          FileSQLCsvReader reader;
-          if (!reader.open(actual_path)) {
-            ret = OB_INVALID_ARGUMENT;
-            LOG_WARN("failed to infer CSV schema", K(ret), "reason", reader.error().c_str(),
-                     "row", reader.row_number());
+          FileSQLCsvReader csv_reader;
+          FileSQLJsonlReader json_reader;
+          const std::vector<FileSQLCsvReader::Column> *columns = NULL;
+          if (T_FUN_SYS_READ_CSV == table_expr->get_expr_type()) {
+            if (csv_reader.open(actual_path)) columns = &csv_reader.columns();
+          } else if (json_reader.open(actual_path)) {
+            columns = &json_reader.columns();
           }
-          for (size_t i = 0; OB_SUCC(ret) && i < reader.columns().size(); ++i) {
-            const FileSQLCsvReader::Column &column = reader.columns()[i];
+          if (OB_ISNULL(columns)) {
+            ret = OB_INVALID_ARGUMENT;
+            LOG_WARN("failed to infer file schema", K(ret),
+                     "csv_reason", csv_reader.error().c_str(),
+                     "json_reason", json_reader.error().c_str());
+          }
+          for (size_t i = 0; OB_SUCC(ret) && i < columns->size(); ++i) {
+            const FileSQLCsvReader::Column &column = (*columns)[i];
             ObObjMeta meta;
             switch (column.type) {
               case FileSQLCsvReader::Type::BOOLEAN: meta.set_tinyint(); break;
@@ -7742,8 +7829,13 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
                                            OB_APP_MIN_COLUMN_ID,
                                            col_item));
   }
-  CK (OB_NOT_NULL(col_item));
-  OZ (col_items.push_back(*col_item));
+  if (OB_SUCC(ret)
+      && T_FUN_SYS_READ_CSV != table_expr->get_expr_type()
+      && T_FUN_SYS_READ_JSON != table_expr->get_expr_type()
+      && T_FUN_SYS_READ_NDJSON != table_expr->get_expr_type()) {
+    CK (OB_NOT_NULL(col_item));
+    OZ (col_items.push_back(*col_item));
+  }
   return ret;
 }
 

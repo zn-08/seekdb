@@ -1050,6 +1050,8 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprAIRerank);
     REG_OP(ObExprAIPrompt);
     REG_OP(FileSQLReadCsvExpr);
+    REG_OP(FileSQLReadJsonExpr);
+    REG_OP(FileSQLReadNdjsonExpr);
   }();
 }
 

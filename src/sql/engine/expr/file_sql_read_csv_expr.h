@@ -20,8 +20,7 @@ class FileSQLReadCsvExpr : public ObFuncExprOperator
 {
 public:
   explicit FileSQLReadCsvExpr(common::ObIAllocator &alloc)
-      : ObFuncExprOperator(alloc, T_FUN_SYS_READ_CSV, N_READ_CSV, 1,
-                           NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+      : FileSQLReadCsvExpr(alloc, T_FUN_SYS_READ_CSV, N_READ_CSV)
   {}
 
   int calc_result_type1(ObExprResType &type, ObExprResType &path,
@@ -52,6 +51,28 @@ public:
     UNUSED(result);
     return common::OB_NOT_SUPPORTED;
   }
+
+protected:
+  FileSQLReadCsvExpr(common::ObIAllocator &alloc, ObExprOperatorType type, const char *name)
+      : ObFuncExprOperator(alloc, type, name, 1,
+                           NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+  {}
+};
+
+class FileSQLReadJsonExpr : public FileSQLReadCsvExpr
+{
+public:
+  explicit FileSQLReadJsonExpr(common::ObIAllocator &alloc)
+      : FileSQLReadCsvExpr(alloc, T_FUN_SYS_READ_JSON, N_READ_JSON)
+  {}
+};
+
+class FileSQLReadNdjsonExpr : public FileSQLReadCsvExpr
+{
+public:
+  explicit FileSQLReadNdjsonExpr(common::ObIAllocator &alloc)
+      : FileSQLReadCsvExpr(alloc, T_FUN_SYS_READ_NDJSON, N_READ_NDJSON)
+  {}
 };
 
 } // namespace sql

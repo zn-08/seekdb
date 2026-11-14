@@ -33,7 +33,8 @@ using namespace common;
 namespace sql
 {
 
-OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_);
+OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_,
+                    column_indexes_, has_correlated_expr_);
 
 int ObFunctionTableOp::inner_open()
 {
@@ -45,6 +46,10 @@ int ObFunctionTableOp::inner_open()
   } else if (T_FUN_SYS_READ_CSV == MY_SPEC.value_expr_->type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_csv;
     ret = inner_open_csv();
+  } else if (T_FUN_SYS_READ_JSON == MY_SPEC.value_expr_->type_
+             || T_FUN_SYS_READ_NDJSON == MY_SPEC.value_expr_->type_) {
+    next_row_func_ = &ObFunctionTableOp::inner_get_next_row_json;
+    ret = inner_open_json();
   } else if (ObExtendType == MY_SPEC.value_expr_->datum_meta_.type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_udf;
   } else {
@@ -62,6 +67,13 @@ int ObFunctionTableOp::inner_rescan()
     if (!csv_reader_.rescan()) {
       ret = OB_INVALID_ARGUMENT;
       LOG_WARN("CSV file changed before rescan", K(ret), "reason", csv_reader_.error().c_str());
+    }
+  } else if (OB_NOT_NULL(MY_SPEC.value_expr_)
+             && (T_FUN_SYS_READ_JSON == MY_SPEC.value_expr_->type_
+                 || T_FUN_SYS_READ_NDJSON == MY_SPEC.value_expr_->type_)) {
+    if (!json_reader_.rescan()) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("JSONL file changed before rescan", K(ret), "reason", json_reader_.error().c_str());
     }
   } else {
     node_idx_ = 0;
@@ -83,6 +95,7 @@ int ObFunctionTableOp::inner_close()
   col_count_ = 0;
   value_table_ = NULL;
   csv_reader_.close();
+  json_reader_.close();
   return ret;
 }
 
@@ -115,9 +128,46 @@ int ObFunctionTableOp::inner_open_csv()
     } else if (!csv_reader_.open(actual_path)) {
       ret = OB_INVALID_ARGUMENT;
       LOG_WARN("failed to open CSV table", K(ret), "reason", csv_reader_.error().c_str());
-    } else if (csv_reader_.columns().size() != MY_SPEC.column_exprs_.count()) {
+    } else if (MY_SPEC.column_indexes_.count() != MY_SPEC.column_exprs_.count()) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("CSV schema changed after query resolution", K(ret));
+      LOG_WARN("CSV projection is invalid", K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::inner_open_json()
+{
+  int ret = OB_SUCCESS;
+  ObDatum *path_datum = NULL;
+  ObString secure_file_priv;
+  char actual_path[PATH_MAX] = {0};
+  if (MY_SPEC.value_expr_->arg_cnt_ != 1 || OB_ISNULL(MY_SPEC.value_expr_->args_[0])) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(MY_SPEC.value_expr_->args_[0]->eval(eval_ctx_, path_datum))) {
+  } else if (OB_ISNULL(path_datum) || path_datum->is_null()) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    const ObString path_value = path_datum->get_string();
+    const std::string path(path_value.ptr(), path_value.length());
+    if (path.empty() || path.find('\0') != std::string::npos) {
+      ret = OB_INVALID_ARGUMENT;
+#ifdef _WIN32
+    } else if (OB_ISNULL(::_fullpath(actual_path, path.c_str(), sizeof(actual_path)))) {
+#else
+    } else if (OB_ISNULL(::realpath(path.c_str(), actual_path))) {
+#endif
+      ret = OB_FILE_NOT_EXIST;
+    } else if (OB_ISNULL(GET_MY_SESSION(ctx_))) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(GET_MY_SESSION(ctx_)->get_secure_file_priv(secure_file_priv))) {
+    } else if (OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, ObString(actual_path)))) {
+    } else if (!json_reader_.open(actual_path)) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("failed to open JSONL table", K(ret), "reason", json_reader_.error().c_str());
+    } else if (MY_SPEC.column_indexes_.count() != MY_SPEC.column_exprs_.count()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("JSONL projection is invalid", K(ret));
     }
   }
   return ret;
@@ -135,22 +185,69 @@ int ObFunctionTableOp::inner_get_next_row_csv()
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("failed to read CSV row", K(ret), "reason", csv_reader_.error().c_str(),
              "row", csv_reader_.row_number());
-  } else if (row.size() != MY_SPEC.column_exprs_.count()) {
+  } else if (row.size() != csv_reader_.columns().size()) {
     ret = OB_INVALID_ARGUMENT;
   } else {
+    ret = write_file_row(row, NULL);
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::inner_get_next_row_json()
+{
+  int ret = OB_SUCCESS;
+  clear_evaluated_flag();
+  std::vector<FileSQLJsonlReader::Cell> cells;
+  const FileSQLJsonlReader::Status status = json_reader_.next(cells);
+  if (status == FileSQLJsonlReader::Status::END) {
+    ret = OB_ITER_END;
+  } else if (status == FileSQLJsonlReader::Status::ERROR) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("failed to read JSONL row", K(ret), "reason", json_reader_.error().c_str(),
+             "row", json_reader_.row_number());
+  } else if (cells.size() != json_reader_.columns().size()) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    std::vector<std::string> row;
+    std::vector<bool> nulls;
+    row.reserve(cells.size());
+    nulls.reserve(cells.size());
+    for (const auto &cell : cells) {
+      row.push_back(cell.text);
+      nulls.push_back(cell.is_null);
+    }
+    ret = write_file_row(row, &nulls);
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::write_file_row(const std::vector<std::string> &row,
+                                      const std::vector<bool> *nulls)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(GET_MY_SESSION(ctx_))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
     const ObDataTypeCastParams dtc_params = ObBasicSessionInfo::create_dtc_params(GET_MY_SESSION(ctx_));
-    for (size_t i = 0; OB_SUCC(ret) && i < row.size(); ++i) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < MY_SPEC.column_exprs_.count(); ++i) {
+      const int64_t column_index = MY_SPEC.column_indexes_.at(i);
       ObExpr *column_expr = MY_SPEC.column_exprs_.at(i);
-      if (OB_ISNULL(column_expr)) {
+      if (OB_ISNULL(column_expr) || column_index < 0
+          || static_cast<size_t>(column_index) >= row.size()) {
         ret = OB_ERR_UNEXPECTED;
       } else {
         ObDatum &datum = column_expr->locate_datum_for_write(eval_ctx_);
-        if (row[i].empty()) {
+        const std::string &value = row[column_index];
+        if (OB_NOT_NULL(nulls) ? (*nulls)[column_index] : value.empty()) {
           datum.set_null();
         } else {
           ObObj source;
           ObObj converted;
-          source.set_varchar(ObString(static_cast<int32_t>(row[i].size()), row[i].data()));
+          const bool boolean_column = column_expr->obj_meta_.get_type() == ObTinyIntType;
+          const std::string cast_value = boolean_column
+              ? (value == "true" ? "1" : value == "false" ? "0" : value)
+              : value;
+          source.set_varchar(ObString(static_cast<int32_t>(cast_value.size()), cast_value.data()));
           source.set_collation_type(CS_TYPE_UTF8MB4_BIN);
           ObAccuracy accuracy = ObAccuracy::DDL_DEFAULT_ACCURACY2[0][column_expr->obj_meta_.get_type()];
           ObCastCtx cast_ctx(&ctx_.get_allocator(), &dtc_params, CM_NONE,

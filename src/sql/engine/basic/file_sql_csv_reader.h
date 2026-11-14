@@ -259,18 +259,8 @@ private:
       Column &col = columns_[i];
       if (observed == Type::NULL_ONLY) {
         col.nullable = true;
-      } else if (col.type == Type::NULL_ONLY) {
-        col.type = observed;
-      } else if (col.type != observed) {
-        if ((col.type == Type::BIGINT && observed == Type::DOUBLE)
-            || (col.type == Type::DOUBLE && observed == Type::BIGINT)) {
-          col.type = Type::DOUBLE;
-        } else if ((col.type == Type::DATE && observed == Type::DATETIME)
-                   || (col.type == Type::DATETIME && observed == Type::DATE)) {
-          col.type = Type::DATETIME;
-        } else {
-          col.type = Type::VARCHAR;
-        }
+      } else {
+        col.type = promote_type(col.type, observed);
       }
     }
     return true;
@@ -295,6 +285,17 @@ private:
     static constexpr int days[] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
     const bool leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
     return day >= 1 && day <= days[month] + (month == 2 && leap ? 1 : 0);
+  }
+
+public:
+  static Type promote_type(Type current, Type observed)
+  {
+    if (current == Type::NULL_ONLY || current == observed) return observed;
+    if ((current == Type::BIGINT && observed == Type::DOUBLE)
+        || (current == Type::DOUBLE && observed == Type::BIGINT)) return Type::DOUBLE;
+    if ((current == Type::DATE && observed == Type::DATETIME)
+        || (current == Type::DATETIME && observed == Type::DATE)) return Type::DATETIME;
+    return Type::VARCHAR;
   }
 
   static Type infer_type(const std::string &text)
@@ -322,6 +323,7 @@ private:
     return Type::VARCHAR;
   }
 
+private:
   std::ifstream stream_;
   std::string path_;
   std::string error_;
