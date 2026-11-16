@@ -543,6 +543,7 @@ END_P SET_VAR DELIMITER
 %type <node> hybrid_search_expr hybrid_search_param
 %type <node> vector_similarity_expr vector_similarity_metric
 %type <node> algorithm_opt lock_opt
+%type <node> file_copy_stmt file_copy_options file_copy_option
 %type <node> flush_privileges_stmt opt_flush_privileges_scope
 %start sql_stmt
 %%
@@ -586,6 +587,7 @@ opt_end_p:
 /* only preparable statement will set question mark size */
 stmt:
     select_stmt             { $$ = $1; question_mark_issue($$, result); }
+  | file_copy_stmt          { $$ = $1; question_mark_issue($$, result); }
   | insert_stmt             { $$ = $1; question_mark_issue($$, result); }
   | create_table_stmt       {
     $$ = $1;
@@ -693,6 +695,54 @@ stmt:
     }
   }
   ;
+
+file_copy_stmt:
+COPY '(' select_stmt ')' TO STRING_VALUE '(' file_copy_options ')'
+{
+  $$ = $3;
+  if (NULL == $$ || T_SELECT != $$->type_
+      || NULL != $$->children_[PARSE_SELECT_INTO]
+      || NULL != $$->children_[PARSE_SELECT_INTO_EXTRA]) {
+    yyerror(&@1, result, "COPY requires a SELECT without INTO");
+    YYERROR;
+  } else {
+    ParseNode *into = NULL;
+    ParseNode *options = NULL;
+    merge_nodes(options, result, T_EXPR_LIST, $8);
+    malloc_non_terminal_node(into, result->malloc_pool_, T_INTO_OUTFILE, 2, $6, options);
+    into->value_ = 1; // COPY CSV, handled separately from SELECT INTO OUTFILE.
+    $$->children_[PARSE_SELECT_INTO_EXTRA] = into;
+  }
+}
+;
+
+file_copy_options:
+file_copy_option
+{
+  malloc_list_node($$, result->malloc_pool_, T_EXPR_LIST, 2, 1, $1);
+}
+| file_copy_options ',' file_copy_option
+{
+  push_back_list(result->malloc_pool_, result, $$, $1, $3);
+}
+;
+
+file_copy_option:
+FORMAT column_label
+{
+  ParseNode *name = NULL;
+  make_name_node(name, result->malloc_pool_, "format");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_OP_EQ, 2, name, $2);
+}
+| column_label
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_OP_EQ, 2, $1, NULL);
+}
+| column_label STRING_VALUE
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_OP_EQ, 2, $1, $2);
+}
+;
 
 /*****************************************************************************
 *

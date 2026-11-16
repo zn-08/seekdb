@@ -6830,6 +6830,15 @@ int ObLogPlan::allocate_select_into_as_top(ObLogicalOperator *&old_top)
       select_into->set_escaped_cht(into_item->escaped_cht_);
       select_into->set_cs_type(into_item->cs_type_);
       select_into->set_external_properties(into_item->external_properties_);
+      select_into->set_copy_to_csv(into_item->copy_to_csv_);
+      select_into->set_copy_header(into_item->copy_header_);
+      select_into->set_copy_nullstr(into_item->copy_nullstr_);
+      if (into_item->copy_to_csv_) {
+        for (int64_t i = 0; OB_SUCC(ret) && i < stmt->get_select_item_size(); ++i) {
+          OZ (select_into->get_copy_column_names().push_back(
+                  stmt->get_select_item(i).alias_name_));
+        }
+      }
       select_into->set_child(ObLogicalOperator::first_child, old_top);
       // compute property
       if (OB_FAIL(select_into->compute_property())) {
