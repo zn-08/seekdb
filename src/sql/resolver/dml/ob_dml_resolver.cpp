@@ -4008,12 +4008,34 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
             }
           } else if (0 == name.case_compare("header")
                      && 0 == file_function_name.case_compare("read_csv")) {
-            const bool enabled = (T_BOOL == value_node->type_ && 1 == value_node->value_)
+            bool enabled = (T_BOOL == value_node->type_ && 1 == value_node->value_)
                 || (T_COLUMN_REF == value_node->type_
+                    && OB_NOT_NULL(value_node->children_)
                     && OB_NOT_NULL(value_node->children_[2])
                     && 0 == ObString(value_node->children_[2]->str_len_,
                                      value_node->children_[2]->str_value_).case_compare("true"));
+            if (!enabled && OB_NOT_NULL(value_node->raw_text_) && value_node->text_len_ > 0) {
+              enabled = 0 == ObString(value_node->text_len_, value_node->raw_text_)
+                  .case_compare("true");
+            }
             if (!enabled) {
+              // Fast parameterization can replace TRUE with a placeholder.
+              // Resolve it through the same parameter store as the file path.
+              ObRawExpr *option_expr = NULL;
+              if (OB_FAIL(resolve_sql_expr(*value_node, option_expr))) {
+              } else if (OB_NOT_NULL(option_expr) && option_expr->is_const_raw_expr()) {
+                const ObObj *option_obj = &static_cast<ObConstRawExpr *>(option_expr)->get_value();
+                if (option_obj->is_unknown() && OB_NOT_NULL(params_.param_list_)) {
+                  const int64_t param_idx = option_obj->get_unknown();
+                  if (param_idx >= 0 && param_idx < params_.param_list_->count()) {
+                    option_obj = &params_.param_list_->at(param_idx);
+                  }
+                }
+                enabled = (option_obj->is_tinyint() && option_obj->get_tinyint() == 1)
+                    || (option_obj->is_int() && option_obj->get_int() == 1);
+              }
+            }
+            if (OB_SUCC(ret) && !enabled) {
               ret = OB_NOT_SUPPORTED;
               LOG_USER_ERROR(OB_NOT_SUPPORTED, "header=false is not supported yet");
             }
@@ -7854,6 +7876,8 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
             ObAccuracy accuracy = ObAccuracy::DDL_DEFAULT_ACCURACY[meta.get_type()];
             if (meta.get_type() == ObVarcharType) {
               accuracy.set_length(65535);
+            } else if (meta.get_type() == ObDateTimeType) {
+              accuracy.set_scale(0);
             }
             ObString column_name;
             ColumnItem *file_col = NULL;
