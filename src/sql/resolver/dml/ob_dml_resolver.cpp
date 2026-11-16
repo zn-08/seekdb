@@ -3983,7 +3983,7 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
     const ParseNode *args = func->num_child_ == 2 ? func->children_[1] : NULL;
     if (OB_ISNULL(args) || T_EXPR_LIST != args->type_ || args->num_child_ < 1
         || OB_ISNULL(args->children_[0])) {
-      ret = OB_ERR_PARSER_SYNTAX;
+      ret = OB_ERR_PARSE_SQL;
     } else {
       for (int32_t i = 1; OB_SUCC(ret) && i < args->num_child_; ++i) {
         const ParseNode *option = args->children_[i];
@@ -3991,7 +3991,7 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
             || OB_ISNULL(option->children_[0]) || OB_ISNULL(option->children_[1])
             || T_COLUMN_REF != option->children_[0]->type_
             || OB_ISNULL(option->children_[0]->children_[2])) {
-          ret = OB_ERR_PARSER_SYNTAX;
+          ret = OB_ERR_PARSE_SQL;
         } else {
           const ParseNode *name_node = option->children_[0]->children_[2];
           const ParseNode *value_node = option->children_[1];
@@ -4022,7 +4022,7 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
             if (T_VARCHAR != value_node->type_
                 || 0 != ObString(value_node->str_len_, value_node->str_value_)
                     .case_compare("newline_delimited")) {
-              ret = OB_ERR_PARSER_SYNTAX;
+              ret = OB_ERR_PARSE_SQL;
             }
           } else {
             ret = OB_NOT_SUPPORTED;
