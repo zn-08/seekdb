@@ -3958,10 +3958,12 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
     const ObString function_name(name_node->str_len_, name_node->str_value_);
     file_function_name = function_name;
     is_file_reader = 0 == function_name.case_compare("read_csv")
+                     || 0 == function_name.case_compare("read_csv_schema")
                      || 0 == function_name.case_compare("read_json")
                      || 0 == function_name.case_compare("read_ndjson")
                      || 0 == function_name.case_compare("glob");
     if (0 == function_name.case_compare("read_csv")
+        || 0 == function_name.case_compare("read_csv_schema")
         || 0 == function_name.case_compare("read_json")
         || 0 == function_name.case_compare("read_ndjson")
         || 0 == function_name.case_compare("read_parquet")
@@ -4041,7 +4043,8 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
               LOG_USER_ERROR(OB_NOT_SUPPORTED, "sample_size only supports -1");
             }
           } else if (0 == name.case_compare("header")
-                     && 0 == file_function_name.case_compare("read_csv")) {
+                     && (0 == file_function_name.case_compare("read_csv")
+                         || 0 == file_function_name.case_compare("read_csv_schema"))) {
             bool enabled = (T_BOOL == value_node->type_ && 1 == value_node->value_)
                 || (T_COLUMN_REF == value_node->type_
                     && OB_NOT_NULL(value_node->children_)
@@ -4074,7 +4077,8 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
               LOG_USER_ERROR(OB_NOT_SUPPORTED, "header=false is not supported yet");
             }
           } else if (0 == name.case_compare("format")
-                     && 0 != file_function_name.case_compare("read_csv")) {
+                     && 0 != file_function_name.case_compare("read_csv")
+                     && 0 != file_function_name.case_compare("read_csv_schema")) {
             bool newline_delimited = T_VARCHAR == value_node->type_
                 && 0 == ObString(value_node->str_len_, value_node->str_value_)
                     .case_compare("newline_delimited");
@@ -7654,7 +7658,8 @@ int ObDMLResolver::resolve_function_table_column_item(const TableItem &table_ite
       && (T_FUN_SYS_READ_CSV == function_expr->get_expr_type()
           || T_FUN_SYS_READ_JSON == function_expr->get_expr_type()
           || T_FUN_SYS_READ_NDJSON == function_expr->get_expr_type()
-          || T_FUN_SYS_FILE_GLOB == function_expr->get_expr_type());
+          || T_FUN_SYS_FILE_GLOB == function_expr->get_expr_type()
+          || T_FUN_SYS_READ_CSV_SCHEMA == function_expr->get_expr_type());
   CK (OB_LIKELY(table_item.is_function_table()));
   CK (OB_NOT_NULL(function_expr));
   if (OB_SUCC(ret)) {
@@ -7826,6 +7831,25 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
   CK (OB_NOT_NULL(table_expr = table_item.function_table_expr_));
   OZ (table_expr->deduce_type(session_info_));
   if (OB_FAIL(ret)) { // do nothing ...
+  } else if (T_FUN_SYS_READ_CSV_SCHEMA == table_expr->get_expr_type()) {
+    static const char *schema_names[] = {
+        "column_name", "column_type", "null", "key", "default", "extra"};
+    ObObjMeta meta;
+    meta.set_varchar();
+    meta.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+    meta.set_collation_level(CS_LEVEL_IMPLICIT);
+    ObAccuracy accuracy = ObAccuracy::DDL_DEFAULT_ACCURACY[ObVarcharType];
+    accuracy.set_length(4096);
+    for (int64_t i = 0; OB_SUCC(ret) && i < 6; ++i) {
+      ColumnItem *schema_col = NULL;
+      if (OB_FAIL(resolve_function_table_column_item(table_item, meta, accuracy,
+                                                     ObString(schema_names[i]),
+                                                     OB_APP_MIN_COLUMN_ID + i, schema_col))) {
+      } else if (OB_ISNULL(schema_col)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(col_items.push_back(*schema_col))) {
+      }
+    }
   } else if (T_FUN_SYS_FILE_GLOB == table_expr->get_expr_type()) {
     if (table_expr->get_param_count() != 1
         || OB_ISNULL(table_expr->get_param_expr(0))
@@ -7962,7 +7986,8 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
       && T_FUN_SYS_READ_CSV != table_expr->get_expr_type()
       && T_FUN_SYS_READ_JSON != table_expr->get_expr_type()
       && T_FUN_SYS_READ_NDJSON != table_expr->get_expr_type()
-      && T_FUN_SYS_FILE_GLOB != table_expr->get_expr_type()) {
+      && T_FUN_SYS_FILE_GLOB != table_expr->get_expr_type()
+      && T_FUN_SYS_READ_CSV_SCHEMA != table_expr->get_expr_type()) {
     CK (OB_NOT_NULL(col_item));
     OZ (col_items.push_back(*col_item));
   }
@@ -8692,7 +8717,8 @@ int ObDMLResolver::get_columns_from_table_item(const TableItem *table_item, ObIA
         && (T_FUN_SYS_READ_CSV == function_expr->get_expr_type()
             || T_FUN_SYS_READ_JSON == function_expr->get_expr_type()
             || T_FUN_SYS_READ_NDJSON == function_expr->get_expr_type()
-            || T_FUN_SYS_FILE_GLOB == function_expr->get_expr_type());
+            || T_FUN_SYS_FILE_GLOB == function_expr->get_expr_type()
+            || T_FUN_SYS_READ_CSV_SCHEMA == function_expr->get_expr_type());
     if (is_file_table) {
       for (int64_t i = 0; OB_SUCC(ret) && i < get_stmt()->get_column_size(); ++i) {
         const ColumnItem *item = get_stmt()->get_column_item(i);

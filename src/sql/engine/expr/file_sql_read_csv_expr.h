@@ -67,6 +67,14 @@ public:
   {}
 };
 
+class FileSQLReadCsvSchemaExpr : public FileSQLReadCsvExpr
+{
+public:
+  explicit FileSQLReadCsvSchemaExpr(common::ObIAllocator &alloc)
+      : FileSQLReadCsvExpr(alloc, T_FUN_SYS_READ_CSV_SCHEMA, N_READ_CSV_SCHEMA)
+  {}
+};
+
 class FileSQLReadNdjsonExpr : public FileSQLReadCsvExpr
 {
 public:

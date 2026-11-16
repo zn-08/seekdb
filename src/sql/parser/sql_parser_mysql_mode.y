@@ -52,6 +52,36 @@
   } \
   malloc_non_terminal_node(explain_stmt, result->malloc_pool_, T_EXPLAIN, 5, \
                            type_node, display_node, into_table, set_statement_id, stmt);
+
+// DESCRIBE SELECT * FROM read_csv(...) uses the CSV schema table function.
+// Other DESCRIBE statements retain their existing EXPLAIN behavior.
+static int rewrite_csv_describe_function(ParseNode *node)
+{
+  if (NULL == node) return 0;
+  if (T_FUN_SYS == node->type_ && node->num_child_ > 0
+      && NULL != node->children_ && NULL != node->children_[0]) {
+    ParseNode *name = node->children_[0];
+    static const char csv_name[] = "read_csv";
+    static const char schema_name[] = "read_csv_schema";
+    if (name->str_len_ == (int64_t)(sizeof(csv_name) - 1) && NULL != name->str_value_) {
+      int equal = 1;
+      for (int64_t i = 0; i < name->str_len_; ++i) {
+        char c = name->str_value_[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != csv_name[i]) equal = 0;
+      }
+      if (equal) {
+        name->str_value_ = schema_name;
+        name->str_len_ = sizeof(schema_name) - 1;
+        return 1;
+      }
+    }
+  }
+  for (int32_t i = 0; i < node->num_child_; ++i) {
+    if (NULL != node->children_ && rewrite_csv_describe_function(node->children_[i])) return 1;
+  }
+  return 0;
+}
 %}
 
 %destructor {destroy_tree($$);}<node>
@@ -12295,7 +12325,14 @@ explain_or_desc relation_factor opt_desc_column_option
   malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $2, NULL, $3);
 }
 
-| explain_or_desc explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);}
+| explain_or_desc explainable_stmt
+{
+  if (NULL != $1 && T_SELECT == $2->type_ && rewrite_csv_describe_function($2)) {
+    $$ = $2;
+  } else {
+    GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);
+  }
+}
 | explain_or_desc PRETTY explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY, $3, NULL, NULL);}
 | explain_or_desc PRETTY_COLOR explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY_COLOR, $3, NULL, NULL);}
 
@@ -12336,8 +12373,16 @@ explain_or_desc relation_factor opt_desc_column_option
 
 explain_or_desc:
 EXPLAIN {$$ = NULL;}
-| DESCRIBE {$$ = NULL;}
-| DESC  {$$ = NULL;}
+| DESCRIBE
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 1;
+}
+| DESC
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 1;
+}
 ;
 
 explainable_stmt:

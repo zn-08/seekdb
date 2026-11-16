@@ -1092,6 +1092,7 @@
 #define N_AI_RERANK                         "ai_rerank"
 #define N_AI_PROMPT                         "ai_prompt"
 #define N_READ_CSV                          "read_csv"
+#define N_READ_CSV_SCHEMA                   "read_csv_schema"
 #define N_READ_JSON                         "read_json"
 #define N_READ_NDJSON                       "read_ndjson"
 #define N_FILE_GLOB                         "glob"

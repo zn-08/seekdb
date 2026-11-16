@@ -65,6 +65,7 @@ private:
   int inner_get_next_row_udf();
   int inner_get_next_row_sys_func();
   int inner_get_next_row_csv();
+  int inner_get_next_row_csv_schema();
   int inner_get_next_row_json();
   int inner_get_next_row_glob();
   int inner_open_csv();
@@ -79,6 +80,7 @@ private:
   common::ObObj value_;
   pl::ObPLCollection *value_table_;
   FileSQLCsvReader csv_reader_;
+  size_t csv_schema_index_ = 0;
   FileSQLJsonlReader json_reader_;
   std::vector<std::string> glob_paths_;
   size_t glob_index_ = 0;

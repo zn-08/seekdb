@@ -52,6 +52,10 @@ int ObFunctionTableOp::inner_open()
   } else if (T_FUN_SYS_READ_CSV == MY_SPEC.value_expr_->type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_csv;
     ret = inner_open_csv();
+  } else if (T_FUN_SYS_READ_CSV_SCHEMA == MY_SPEC.value_expr_->type_) {
+    next_row_func_ = &ObFunctionTableOp::inner_get_next_row_csv_schema;
+    csv_schema_index_ = 0;
+    ret = inner_open_csv();
   } else if (T_FUN_SYS_READ_JSON == MY_SPEC.value_expr_->type_
              || T_FUN_SYS_READ_NDJSON == MY_SPEC.value_expr_->type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_json;
@@ -72,11 +76,13 @@ int ObFunctionTableOp::inner_rescan()
   int ret = OB_SUCCESS;
   if (OB_FAIL(ObOperator::inner_rescan())) {
   } else if (OB_NOT_NULL(MY_SPEC.value_expr_)
-             && T_FUN_SYS_READ_CSV == MY_SPEC.value_expr_->type_) {
+             && (T_FUN_SYS_READ_CSV == MY_SPEC.value_expr_->type_
+                 || T_FUN_SYS_READ_CSV_SCHEMA == MY_SPEC.value_expr_->type_)) {
     if (!csv_reader_.rescan()) {
       ret = OB_INVALID_ARGUMENT;
       LOG_WARN("CSV file changed before rescan", K(ret), "reason", csv_reader_.error().c_str());
     }
+    csv_schema_index_ = 0;
   } else if (OB_NOT_NULL(MY_SPEC.value_expr_)
              && (T_FUN_SYS_READ_JSON == MY_SPEC.value_expr_->type_
                  || T_FUN_SYS_READ_NDJSON == MY_SPEC.value_expr_->type_)) {
@@ -107,6 +113,7 @@ int ObFunctionTableOp::inner_close()
   col_count_ = 0;
   value_table_ = NULL;
   csv_reader_.close();
+  csv_schema_index_ = 0;
   json_reader_.close();
   glob_paths_.clear();
   glob_index_ = 0;
@@ -300,6 +307,31 @@ int ObFunctionTableOp::inner_get_next_row_csv()
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "CSV row width");
   } else {
     ret = write_file_row(row, NULL);
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::inner_get_next_row_csv_schema()
+{
+  int ret = OB_SUCCESS;
+  clear_evaluated_flag();
+  if (csv_schema_index_ >= csv_reader_.columns().size()) {
+    ret = OB_ITER_END;
+  } else {
+    const FileSQLCsvReader::Column &column = csv_reader_.columns()[csv_schema_index_++];
+    const char *type_name = "VARCHAR";
+    switch (column.type) {
+      case FileSQLCsvReader::Type::BOOLEAN: type_name = "BOOLEAN"; break;
+      case FileSQLCsvReader::Type::BIGINT: type_name = "BIGINT"; break;
+      case FileSQLCsvReader::Type::DOUBLE: type_name = "DOUBLE"; break;
+      case FileSQLCsvReader::Type::DATE: type_name = "DATE"; break;
+      case FileSQLCsvReader::Type::DATETIME: type_name = "DATETIME"; break;
+      default: break;
+    }
+    const std::vector<std::string> row{
+        column.name, type_name, column.nullable ? "YES" : "NO", "", "", ""};
+    const std::vector<bool> nulls{false, false, false, true, true, true};
+    ret = write_file_row(row, &nulls);
   }
   return ret;
 }
