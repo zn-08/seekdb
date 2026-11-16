@@ -3997,12 +3997,46 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
           const ParseNode *value_node = option->children_[1];
           const ObString name(name_node->str_len_, name_node->str_value_);
           if (0 == name.case_compare("sample_size")) {
-            const bool minus_one = (T_INT == value_node->type_ && -1 == value_node->value_)
+            bool minus_one = (T_INT == value_node->type_ && -1 == value_node->value_)
                 || (T_OP_NEG == value_node->type_ && value_node->num_child_ == 1
+                    && OB_NOT_NULL(value_node->children_)
                     && OB_NOT_NULL(value_node->children_[0])
                     && T_INT == value_node->children_[0]->type_
                     && 1 == value_node->children_[0]->value_);
+            if (!minus_one && OB_NOT_NULL(value_node->raw_text_) && value_node->text_len_ > 0) {
+              minus_one = 0 == ObString(value_node->text_len_, value_node->raw_text_)
+                  .case_compare("-1");
+            }
             if (!minus_one) {
+              // Fast parameterization may replace either -1 or its operand
+              // with a placeholder. Read the bound value before validation.
+              const ParseNode *numeric_node = value_node;
+              bool negated = false;
+              if (T_OP_NEG == value_node->type_ && value_node->num_child_ == 1
+                  && OB_NOT_NULL(value_node->children_)
+                  && OB_NOT_NULL(value_node->children_[0])) {
+                numeric_node = value_node->children_[0];
+                negated = true;
+              }
+              ObRawExpr *option_expr = NULL;
+              if (OB_FAIL(resolve_sql_expr(*numeric_node, option_expr))) {
+              } else if (OB_NOT_NULL(option_expr) && option_expr->is_const_raw_expr()) {
+                const ObObj *option_obj = &static_cast<ObConstRawExpr *>(option_expr)->get_value();
+                if (option_obj->is_unknown() && OB_NOT_NULL(params_.param_list_)) {
+                  const int64_t param_idx = option_obj->get_unknown();
+                  if (param_idx >= 0 && param_idx < params_.param_list_->count()) {
+                    option_obj = &params_.param_list_->at(param_idx);
+                  }
+                }
+                if (option_obj->is_int()) {
+                  minus_one = negated ? option_obj->get_int() == 1 : option_obj->get_int() == -1;
+                } else if (option_obj->is_tinyint()) {
+                  minus_one = negated ? option_obj->get_tinyint() == 1
+                                      : option_obj->get_tinyint() == -1;
+                }
+              }
+            }
+            if (OB_SUCC(ret) && !minus_one) {
               ret = OB_NOT_SUPPORTED;
               LOG_USER_ERROR(OB_NOT_SUPPORTED, "sample_size only supports -1");
             }
