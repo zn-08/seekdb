@@ -4075,9 +4075,25 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
             }
           } else if (0 == name.case_compare("format")
                      && 0 != file_function_name.case_compare("read_csv")) {
-            if (T_VARCHAR != value_node->type_
-                || 0 != ObString(value_node->str_len_, value_node->str_value_)
-                    .case_compare("newline_delimited")) {
+            bool newline_delimited = T_VARCHAR == value_node->type_
+                && 0 == ObString(value_node->str_len_, value_node->str_value_)
+                    .case_compare("newline_delimited");
+            if (!newline_delimited) {
+              ObRawExpr *option_expr = NULL;
+              if (OB_FAIL(resolve_sql_expr(*value_node, option_expr))) {
+              } else if (OB_NOT_NULL(option_expr) && option_expr->is_const_raw_expr()) {
+                const ObObj *option_obj = &static_cast<ObConstRawExpr *>(option_expr)->get_value();
+                if (option_obj->is_unknown() && OB_NOT_NULL(params_.param_list_)) {
+                  const int64_t param_idx = option_obj->get_unknown();
+                  if (param_idx >= 0 && param_idx < params_.param_list_->count()) {
+                    option_obj = &params_.param_list_->at(param_idx);
+                  }
+                }
+                newline_delimited = option_obj->is_string_type()
+                    && 0 == option_obj->get_string().case_compare("newline_delimited");
+              }
+            }
+            if (OB_SUCC(ret) && !newline_delimited) {
               ret = OB_ERR_PARSE_SQL;
             }
           } else {
