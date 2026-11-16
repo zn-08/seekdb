@@ -3109,11 +3109,8 @@ int ObSelectResolver::resolve_into_clause(const ParseNode *node)
           ret = OB_INAPPROPRIATE_INTO;
         } else if (node->value_ == 1 && node->num_child_ == 2) { // COPY ... TO CSV
           int64_t enabled = 0;
-          const ParseNode *options = node->children_[1];
-          bool seen_format = false;
-          if (OB_ISNULL(session_info_) || OB_ISNULL(options)
-              || T_EXPR_LIST != options->type_) {
-            ret = OB_ERR_PARSE_SQL;
+          if (OB_ISNULL(session_info_)) {
+            ret = OB_ERR_UNEXPECTED;
           } else if (OB_FAIL(session_info_->get_sys_variable(
                          share::SYS_VAR_ENABLE_FILE_SQL, enabled))) {
           } else if (enabled == 0) {
@@ -3128,43 +3125,8 @@ int ObSelectResolver::resolve_into_clause(const ParseNode *node)
             into_item->closed_cht_.set_char_value("\"", 1);
             into_item->escaped_cht_.set_char_value("\"", 1);
             into_item->is_optional_ = true;
-            for (int32_t i = 0; OB_SUCC(ret) && i < options->num_child_; ++i) {
-              const ParseNode *option = options->children_[i];
-              if (OB_ISNULL(option) || T_OP_EQ != option->type_
-                  || option->num_child_ != 2 || OB_ISNULL(option->children_[0])) {
-                ret = OB_ERR_PARSE_SQL;
-              } else {
-                const ParseNode *name_node = option->children_[0];
-                const ParseNode *value_node = option->children_[1];
-                const ObString name(name_node->str_len_, name_node->str_value_);
-                if (0 == name.case_compare("format")) {
-                  if (OB_ISNULL(value_node)
-                      || 0 != ObString(value_node->str_len_, value_node->str_value_)
-                          .case_compare("csv")) {
-                    ret = OB_NOT_SUPPORTED;
-                    LOG_USER_ERROR(OB_NOT_SUPPORTED, "COPY supports CSV format");
-                  } else {
-                    seen_format = true;
-                  }
-                } else if (0 == name.case_compare("header")) {
-                  if (OB_NOT_NULL(value_node)) ret = OB_ERR_PARSE_SQL;
-                  else into_item->copy_header_ = true;
-                } else if (0 == name.case_compare("nullstr")) {
-                  if (OB_ISNULL(value_node) || T_VARCHAR != value_node->type_
-                      || OB_FAIL(ob_write_string(*allocator_,
-                                    ObString(value_node->str_len_, value_node->str_value_),
-                                    into_item->copy_nullstr_))) {
-                    if (OB_SUCC(ret)) ret = OB_ERR_PARSE_SQL;
-                  }
-                } else {
-                  ret = OB_NOT_SUPPORTED;
-                  LOG_USER_ERROR(OB_NOT_SUPPORTED, "COPY option");
-                }
-              }
-            }
-            if (OB_SUCC(ret) && !seen_format) {
-              ret = OB_ERR_PARSE_SQL;
-            }
+            into_item->copy_header_ = true;
+            OZ (ob_write_string(*allocator_, ObString("NULL"), into_item->copy_nullstr_));
           }
         } else if (node->num_child_ == 3 && NULL != node->children_[1]
             && T_EXTERNAL_FILE_FORMAT == node->children_[1]->type_) { // Handle with `FORMAT`
