@@ -8596,9 +8596,23 @@ int ObDMLResolver::get_columns_from_table_item(const TableItem *table_item, ObIA
       }
     }
   } else if (table_item->is_function_table()) {
-    OZ (ObResolverUtils::get_all_function_table_column_names(*table_item,
-                                                             params_,
-                                                             column_names));
+    const ObRawExpr *function_expr = table_item->function_table_expr_;
+    const bool is_file_table = OB_NOT_NULL(function_expr)
+        && (T_FUN_SYS_READ_CSV == function_expr->get_expr_type()
+            || T_FUN_SYS_READ_JSON == function_expr->get_expr_type()
+            || T_FUN_SYS_READ_NDJSON == function_expr->get_expr_type()
+            || T_FUN_SYS_FILE_GLOB == function_expr->get_expr_type());
+    if (is_file_table) {
+      for (int64_t i = 0; OB_SUCC(ret) && i < get_stmt()->get_column_size(); ++i) {
+        const ColumnItem *item = get_stmt()->get_column_item(i);
+        if (OB_NOT_NULL(item) && item->table_id_ == table_item->table_id_) {
+          OZ (column_names.push_back(item->column_name_));
+        }
+      }
+    } else {
+      OZ (ObResolverUtils::get_all_function_table_column_names(*table_item,
+                                                               params_, column_names));
+    }
   } else if (table_item->is_basic_table() || table_item->is_fake_cte_table()) {
     /**
      * LINK_TABLE and CTE_TABLE is same as BASIC_TABLE or ALIAS_TABLE

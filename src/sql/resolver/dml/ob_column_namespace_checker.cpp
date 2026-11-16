@@ -313,9 +313,20 @@ int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, c
         table_id, col_name, is_exist))) {
     }
   } else if (table_item.is_function_table()) {
-    if (OB_FAIL(ObResolverUtils::check_function_table_column_exist(table_item,
-                                                                   params_,
-                                                                   col_name))) {
+    const ObRawExpr *function_expr = table_item.function_table_expr_;
+    const bool is_file_table = OB_NOT_NULL(function_expr)
+        && (T_FUN_SYS_READ_CSV == function_expr->get_expr_type()
+            || T_FUN_SYS_READ_JSON == function_expr->get_expr_type()
+            || T_FUN_SYS_READ_NDJSON == function_expr->get_expr_type()
+            || T_FUN_SYS_FILE_GLOB == function_expr->get_expr_type());
+    if (is_file_table && OB_NOT_NULL(dml_stmt_)) {
+      for (int64_t i = 0; !is_exist && i < dml_stmt_->get_column_size(); ++i) {
+        const ColumnItem *item = dml_stmt_->get_column_item(i);
+        is_exist = OB_NOT_NULL(item) && item->table_id_ == table_item.table_id_
+            && ObCharset::case_insensitive_equal(item->column_name_, col_name);
+      }
+    } else if (OB_FAIL(ObResolverUtils::check_function_table_column_exist(table_item,
+                                                                           params_, col_name))) {
     } else {
       is_exist = true;
     }
