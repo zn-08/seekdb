@@ -7954,6 +7954,8 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
                 case FileSQLParquetReader::Type::BOOLEAN: meta.set_tinyint(); break;
                 case FileSQLParquetReader::Type::BIGINT: meta.set_int(); break;
                 case FileSQLParquetReader::Type::DOUBLE: meta.set_double(); break;
+                case FileSQLParquetReader::Type::DATE: meta.set_date(); break;
+                case FileSQLParquetReader::Type::DATETIME: meta.set_datetime(); break;
                 default: meta.set_varchar(); break;
               }
             } else {
@@ -7975,7 +7977,7 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
             if (meta.get_type() == ObVarcharType) {
               accuracy.set_length(65535);
             } else if (meta.get_type() == ObDateTimeType) {
-              accuracy.set_scale(0);
+              accuracy.set_scale(OB_NOT_NULL(parquet_columns) ? 6 : 0);
             }
             ObString column_name;
             ColumnItem *file_col = NULL;

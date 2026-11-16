@@ -6,11 +6,13 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <limits>
 #include <string>
+#include <sys/stat.h>
 #include <utility>
 #include <vector>
 
@@ -23,7 +25,7 @@ class FileSQLParquetReader
 {
 public:
   enum class Status { ROW, END, ERROR };
-  enum class Type { BOOLEAN, BIGINT, DOUBLE, VARCHAR };
+  enum class Type { BOOLEAN, BIGINT, DOUBLE, DATE, DATETIME, VARCHAR };
   struct Column { std::string name; Type type; bool nullable; };
 
   bool open(const std::string &path)
@@ -37,6 +39,10 @@ public:
     if (size < 12 || size > static_cast<std::streamoff>(MAX_FILE_SIZE))
       return fail("invalid Parquet file size");
     file_size_ = static_cast<uint64_t>(size);
+    FileStat stat_buf;
+    if (file_stat(path, stat_buf) != 0 || stat_buf.st_size != size)
+      return fail("Parquet file changed during open");
+    file_mtime_ = stat_buf.st_mtime;
     char footer[8];
     in_.seekg(size - 8);
     if (!in_.read(footer, 8) || std::memcmp(footer + 4, "PAR1", 4) != 0)
@@ -51,25 +57,40 @@ public:
     if (!parse_file(c) || columns_.empty() || groups_.empty())
       return fail("unsupported or damaged Parquet metadata");
     if (c.pos > c.size) return fail("invalid Parquet metadata");
+    projected_.assign(columns_.size(), true);
+    if (!unchanged()) return false;
     return rescan();
   }
 
   bool rescan()
   {
     if (!in_.is_open()) return fail("Parquet file is closed");
+    if (!unchanged()) return false;
     group_index_ = 0;
     row_index_ = 0;
-    values_.clear();
+    streams_.clear();
     return true;
+  }
+
+  bool project(const std::vector<size_t> &indexes)
+  {
+    projected_.assign(columns_.size(), false);
+    for (size_t index : indexes) {
+      if (index >= columns_.size()) return fail("invalid Parquet projection");
+      projected_[index] = true;
+    }
+    return rescan();
   }
 
   void close()
   {
     in_.close();
     columns_.clear();
+    projected_.clear();
+    logical_.clear();
     physical_.clear();
     groups_.clear();
-    values_.clear();
+    streams_.clear();
     path_.clear();
     error_.clear();
     group_index_ = row_index_ = 0;
@@ -81,14 +102,21 @@ public:
     while (group_index_ < groups_.size() && row_index_ >= groups_[group_index_].rows) {
       ++group_index_;
       row_index_ = 0;
-      values_.clear();
+      streams_.clear();
     }
     if (group_index_ >= groups_.size()) return Status::END;
-    if (values_.empty() && !load_group(groups_[group_index_])) return Status::ERROR;
-    for (const auto &column : values_) {
-      if (row_index_ >= column.size()) { fail("short Parquet column"); return Status::ERROR; }
-      row.push_back(column[row_index_].text);
-      nulls.push_back(column[row_index_].is_null);
+    if (streams_.empty() && !open_group(groups_[group_index_])) return Status::ERROR;
+    for (size_t i = 0; i < streams_.size(); ++i) {
+      if (!projected_[i]) { row.emplace_back(); nulls.push_back(true); continue; }
+      ColumnStream &stream = streams_[i];
+      if (stream.cell_index == stream.cells.size() && !load_page(i)) return Status::ERROR;
+      if (stream.cell_index >= stream.cells.size()) {
+        fail("short Parquet column"); return Status::ERROR;
+      }
+      const Cell &cell = stream.cells[stream.cell_index++];
+      row.push_back(cell.text);
+      nulls.push_back(cell.is_null);
+      ++stream.read;
     }
     ++row_index_;
     return Status::ROW;
@@ -98,6 +126,13 @@ public:
   const std::string &error() const { return error_; }
 
 private:
+#ifdef _WIN32
+  using FileStat = struct _stat64;
+  static int file_stat(const std::string &path, FileStat &out) { return ::_stat64(path.c_str(), &out); }
+#else
+  using FileStat = struct stat;
+  static int file_stat(const std::string &path, FileStat &out) { return ::stat(path.c_str(), &out); }
+#endif
   static constexpr uint64_t MAX_FILE_SIZE = 1ULL << 32;
   static constexpr uint32_t MAX_METADATA = 16U << 20;
   static constexpr uint32_t MAX_PAGE = 64U << 20;
@@ -106,6 +141,9 @@ private:
   struct Chunk { int physical = -1; int codec = -1; uint64_t offset = 0;
                  uint64_t dictionary_offset = 0; uint64_t count = 0; };
   struct Group { uint64_t rows = 0; std::vector<Chunk> chunks; };
+  struct ColumnStream { Chunk chunk; uint64_t offset = 0; uint64_t read = 0;
+                        std::vector<Cell> dictionary; std::vector<Cell> cells;
+                        size_t cell_index = 0; };
   struct Page { int type = -1; int encoding = -1; int def_encoding = -1;
                 uint32_t compressed = 0; uint32_t uncompressed = 0;
                 uint32_t values = 0; uint32_t def_bytes = 0; bool is_compressed = true; };
@@ -193,9 +231,43 @@ private:
     uint8_t elem;
     return type == 9 && list(c, elem, n) && elem == 12 && n <= MAX_COLUMNS * 1024;
   }
+  static bool parse_time_unit(Cursor &c, int &logical) {
+    int last = 0, id; uint8_t t;
+    do {
+      if (!c.field(last, id, t)) return false;
+      if (!t) break;
+      if (t == 12 && id >= 1 && id <= 3) {
+        logical = id == 1 ? 9 : id == 2 ? 10 : 11;
+      }
+      if (!skip(c, t)) return false;
+    } while (true);
+    return true;
+  }
+  static bool parse_logical_type(Cursor &c, int &logical) {
+    int last = 0, id; uint8_t t;
+    do {
+      if (!c.field(last, id, t)) return false;
+      if (!t) break;
+      if (id == 6 && t == 12) {
+        logical = 6;
+        if (!skip(c, t)) return false;
+      } else if (id == 8 && t == 12) {
+        int inner_last = 0, inner_id; uint8_t inner_t;
+        do {
+          if (!c.field(inner_last, inner_id, inner_t)) return false;
+          if (!inner_t) break;
+          if (inner_id == 2 && inner_t == 12) {
+            if (!parse_time_unit(c, logical)) return false;
+          } else if (!skip(c, inner_t)) return false;
+        } while (true);
+      } else if (!skip(c, t)) return false;
+    } while (true);
+    return true;
+  }
 
-  bool parse_schema_element(Cursor &c, Column &out, int &children, int &physical) {
-    int last = 0, id; uint8_t t; int64_t v; children = 0; physical = -1;
+  bool parse_schema_element(Cursor &c, Column &out, int &children, int &physical,
+                            int &logical) {
+    int last = 0, id; uint8_t t; int64_t v; children = 0; physical = -1; logical = -1;
     out = Column{"", Type::VARCHAR, false};
     do {
       if (!c.field(last, id, t)) return false;
@@ -204,9 +276,15 @@ private:
       else if (id == 3 && integer(c, t, v)) out.nullable = (v == 1);
       else if (id == 4 && string(c, t, out.name)) {}
       else if (id == 5 && integer(c, t, v)) children = int(v);
+      else if (id == 6 && integer(c, t, v)) logical = int(v);
+      else if (id == 10 && t == 12) {
+        if (!parse_logical_type(c, logical)) return false;
+      }
       else if (!skip(c, t)) return false;
     } while (true);
-    if (physical == 0) out.type = Type::BOOLEAN;
+    if (logical == 6) out.type = Type::DATE;
+    else if (logical == 9 || logical == 10 || logical == 11) out.type = Type::DATETIME;
+    else if (physical == 0) out.type = Type::BOOLEAN;
     else if (physical == 1 || physical == 2) out.type = Type::BIGINT;
     else if (physical == 4 || physical == 5) out.type = Type::DOUBLE;
     else out.type = Type::VARCHAR;
@@ -260,11 +338,12 @@ private:
       if (id == 2) {
         uint64_t n; if (!structs(c, t, n) || n < 2 || n > MAX_COLUMNS + 1) return false;
         for (uint64_t i = 0; i < n; ++i) {
-          Column column; int children, physical;
-          if (!parse_schema_element(c, column, children, physical)) return false;
+          Column column; int children, physical, logical;
+          if (!parse_schema_element(c, column, children, physical, logical)) return false;
           if (i == 0) { if (children != int(n - 1)) return false; }
           else { if (children != 0 || physical < 0) return false;
-            columns_.push_back(column); physical_.push_back(physical); }
+            columns_.push_back(column); physical_.push_back(physical);
+            logical_.push_back(logical); }
         }
       } else if (id == 3 && integer(c, t, v)) total_rows = uint64_t(v);
       else if (id == 4) {
@@ -386,16 +465,56 @@ private:
     }
     return true;
   }
-  static bool plain_cell(Cursor &c, int physical, Cell &cell) {
+  static std::string date_text(int64_t days) {
+    int64_t z = days + 719468;
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const uint32_t doe = uint32_t(z - era * 146097);
+    const uint32_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t year = int64_t(yoe) + era * 400;
+    const uint32_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const uint32_t mp = (5 * doy + 2) / 153;
+    const uint32_t day = doy - (153 * mp + 2) / 5 + 1;
+    const uint32_t month = mp < 10 ? mp + 3 : mp - 9;
+    year += month <= 2;
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02u",
+                  static_cast<long long>(year), month, day);
+    return buf;
+  }
+  static std::string timestamp_text(int64_t raw, int logical) {
+    const int64_t unit = logical == 9 ? 1000 : logical == 11 ? 1000000000 : 1000000;
+    int64_t seconds = raw / unit;
+    int64_t fraction = raw % unit;
+    if (fraction < 0) { fraction += unit; --seconds; }
+    int64_t days = seconds / 86400;
+    int64_t rem = seconds % 86400;
+    if (rem < 0) { rem += 86400; --days; }
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "%s %02lld:%02lld:%02lld.%06lld",
+                  date_text(days).c_str(), static_cast<long long>(rem / 3600),
+                  static_cast<long long>((rem / 60) % 60),
+                  static_cast<long long>(rem % 60),
+                  static_cast<long long>(logical == 9 ? fraction * 1000
+                                          : logical == 11 ? fraction / 1000 : fraction));
+    return buf;
+  }
+  static bool plain_cell(Cursor &c, int physical, int logical, Cell &cell) {
     if (physical == 1 || physical == 4) {
       if (c.size - c.pos < 4) return false;
-      if (physical == 1) cell.text = std::to_string(static_cast<int32_t>(u32(c.data + c.pos)));
+      if (physical == 1) {
+        const int32_t value = static_cast<int32_t>(u32(c.data + c.pos));
+        cell.text = logical == 6 ? date_text(value) : std::to_string(value);
+      }
       else { uint32_t bits = u32(c.data + c.pos); float value;
         std::memcpy(&value, &bits, 4); cell.text = std::to_string(value); }
       c.pos += 4;
     } else if (physical == 2 || physical == 5) {
       if (c.size - c.pos < 8) return false;
-      if (physical == 2) cell.text = std::to_string(static_cast<int64_t>(u64(c.data + c.pos)));
+      if (physical == 2) {
+        const int64_t value = static_cast<int64_t>(u64(c.data + c.pos));
+        cell.text = logical == 9 || logical == 10 || logical == 11
+            ? timestamp_text(value, logical) : std::to_string(value);
+      }
       else { uint64_t bits = u64(c.data + c.pos); double value;
         std::memcpy(&value, &bits, 8); cell.text = std::to_string(value); }
       c.pos += 8;
@@ -440,39 +559,50 @@ private:
           if (value_index / 8 >= c.size - c.pos) return false;
           cell.text = (c.data[c.pos + value_index / 8] >> (value_index % 8)) & 1 ? "1" : "0";
           ++value_index;
-        } else if (!plain_cell(c, physical, cell)) return false;
+        } else if (!plain_cell(c, physical, logical_[column], cell)) return false;
       }
       out.push_back(std::move(cell));
     }
     return true;
   }
-  bool load_group(const Group &group) {
-    values_.assign(columns_.size(), {});
+  bool open_group(const Group &group) {
+    streams_.clear();
     for (size_t i = 0; i < group.chunks.size(); ++i) {
       const Chunk &chunk = group.chunks[i];
-      if (chunk.physical != physical_[i] || chunk.offset < 4 || chunk.offset >= file_size_)
+      if (projected_[i]
+          && (chunk.physical != physical_[i] || chunk.offset < 4 || chunk.offset >= file_size_))
         return fail("unsupported Parquet column layout");
-      uint64_t offset = chunk.dictionary_offset ? chunk.dictionary_offset : chunk.offset;
-      std::vector<Cell> dictionary;
-      while (values_[i].size() < group.rows) {
-        if (offset + 64 > file_size_) return fail("truncated Parquet page");
+      ColumnStream stream;
+      stream.chunk = chunk;
+      stream.offset = chunk.dictionary_offset ? chunk.dictionary_offset : chunk.offset;
+      streams_.push_back(std::move(stream));
+    }
+    return true;
+  }
+  bool load_page(size_t i) {
+    if (!unchanged()) return false;
+    ColumnStream &stream = streams_[i];
+    stream.cells.clear(); stream.cell_index = 0;
+    const uint64_t group_rows = groups_[group_index_].rows;
+    for (int skipped = 0; skipped < 4; ++skipped) {
+        if (stream.offset >= file_size_) return fail("truncated Parquet page");
         std::string header(4096, '\0');
-        in_.clear(); in_.seekg(static_cast<std::streamoff>(offset));
-        const size_t available = static_cast<size_t>(std::min<uint64_t>(header.size(), file_size_ - offset));
+        in_.clear(); in_.seekg(static_cast<std::streamoff>(stream.offset));
+        const size_t available = static_cast<size_t>(std::min<uint64_t>(header.size(), file_size_ - stream.offset));
         if (!in_.read(&header[0], available)) return fail("cannot read Parquet page header");
         Cursor c(reinterpret_cast<const uint8_t *>(header.data()), available); Page page;
-        if (!parse_page(c, page) || offset + c.pos + page.compressed > file_size_)
+        if (!parse_page(c, page) || stream.offset + c.pos + page.compressed > file_size_)
           return fail("invalid Parquet page header");
-        offset += c.pos;
+        stream.offset += c.pos;
         std::string encoded(page.compressed, '\0');
-        in_.clear(); in_.seekg(static_cast<std::streamoff>(offset));
+        in_.clear(); in_.seekg(static_cast<std::streamoff>(stream.offset));
         if (!in_.read(&encoded[0], page.compressed)) return fail("cannot read Parquet page");
-        offset += page.compressed;
+        stream.offset += page.compressed;
         if (page.type != 0 && page.type != 2 && page.type != 3)
           return fail("unsupported Parquet page type");
         std::string plain;
-        if (chunk.codec == 0) plain = std::move(encoded);
-        else if (chunk.codec == 1) {
+        if (stream.chunk.codec == 0) plain = std::move(encoded);
+        else if (stream.chunk.codec == 1) {
           if (page.type == 3) {
             if (page.def_bytes > encoded.size() || page.def_bytes > page.uncompressed)
               return fail("invalid Parquet level length");
@@ -496,26 +626,36 @@ private:
           Cursor entries(plain);
           for (uint32_t item = 0; item < page.values; ++item) {
             Cell cell;
-            if (!plain_cell(entries, physical_[i], cell))
+            if (!plain_cell(entries, physical_[i], logical_[i], cell))
               return fail("invalid Parquet dictionary");
-            dictionary.push_back(std::move(cell));
+            stream.dictionary.push_back(std::move(cell));
           }
-        } else if (!decode_page(plain, page, i, dictionary, values_[i])) {
+        } else if (!decode_page(plain, page, i, stream.dictionary, stream.cells)) {
           return fail("unsupported Parquet encoding");
         }
-        if (values_[i].size() > group.rows) return fail("Parquet row count mismatch");
-      }
+        if (stream.cells.size() > group_rows - stream.read)
+          return fail("Parquet row count mismatch");
+        if (!stream.cells.empty()) return true;
     }
-    return true;
+    return fail("empty Parquet pages");
   }
   bool fail(const char *message) { error_ = message; return false; }
+  bool unchanged() {
+    FileStat stat_buf;
+    return file_stat(path_, stat_buf) == 0 && stat_buf.st_size >= 0
+        && uint64_t(stat_buf.st_size) == file_size_ && stat_buf.st_mtime == file_mtime_
+        ? true : fail("Parquet file changed during scan");
+  }
   std::ifstream in_;
   std::string path_, error_;
   uint64_t file_size_ = 0;
+  int64_t file_mtime_ = 0;
   std::vector<Column> columns_;
+  std::vector<bool> projected_;
   std::vector<int> physical_;
+  std::vector<int> logical_;
   std::vector<Group> groups_;
-  std::vector<std::vector<Cell>> values_;
+  std::vector<ColumnStream> streams_;
   size_t group_index_ = 0;
   uint64_t row_index_ = 0;
 };

@@ -240,6 +240,15 @@ int ObFunctionTableOp::inner_open_parquet()
       LOG_WARN("failed to open Parquet table", K(ret), "reason", parquet_reader_.error().c_str());
     } else if (MY_SPEC.column_indexes_.count() != MY_SPEC.column_exprs_.count()) {
       ret = OB_ERR_UNEXPECTED;
+    } else {
+      std::vector<size_t> projected;
+      for (int64_t i = 0; i < MY_SPEC.column_indexes_.count(); ++i) {
+        projected.push_back(static_cast<size_t>(MY_SPEC.column_indexes_.at(i)));
+      }
+      if (!parquet_reader_.project(projected)) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, parquet_reader_.error().c_str());
+      }
     }
   }
   return ret;
