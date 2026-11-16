@@ -319,7 +319,8 @@ int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, c
             || T_FUN_SYS_READ_JSON == function_expr->get_expr_type()
             || T_FUN_SYS_READ_NDJSON == function_expr->get_expr_type()
             || T_FUN_SYS_FILE_GLOB == function_expr->get_expr_type()
-            || T_FUN_SYS_READ_CSV_SCHEMA == function_expr->get_expr_type());
+            || T_FUN_SYS_READ_CSV_SCHEMA == function_expr->get_expr_type()
+            || T_FUN_SYS_READ_PARQUET == function_expr->get_expr_type());
     if (is_file_table && OB_NOT_NULL(dml_stmt_)) {
       for (int64_t i = 0; !is_exist && i < dml_stmt_->get_column_size(); ++i) {
         const ColumnItem *item = dml_stmt_->get_column_item(i);

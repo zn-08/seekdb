@@ -43,6 +43,7 @@
 #include "sql/hybrid_search/ob_hybrid_search_executor.h"
 #include "sql/engine/basic/file_sql_csv_reader.h"
 #include "sql/engine/basic/file_sql_jsonl_reader.h"
+#include "sql/engine/basic/file_sql_parquet_reader.h"
 #include <limits.h>
 #include <string>
 
@@ -3961,6 +3962,7 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
                      || 0 == function_name.case_compare("read_csv_schema")
                      || 0 == function_name.case_compare("read_json")
                      || 0 == function_name.case_compare("read_ndjson")
+                     || 0 == function_name.case_compare("read_parquet")
                      || 0 == function_name.case_compare("glob");
     if (0 == function_name.case_compare("read_csv")
         || 0 == function_name.case_compare("read_csv_schema")
@@ -7659,7 +7661,8 @@ int ObDMLResolver::resolve_function_table_column_item(const TableItem &table_ite
           || T_FUN_SYS_READ_JSON == function_expr->get_expr_type()
           || T_FUN_SYS_READ_NDJSON == function_expr->get_expr_type()
           || T_FUN_SYS_FILE_GLOB == function_expr->get_expr_type()
-          || T_FUN_SYS_READ_CSV_SCHEMA == function_expr->get_expr_type());
+          || T_FUN_SYS_READ_CSV_SCHEMA == function_expr->get_expr_type()
+          || T_FUN_SYS_READ_PARQUET == function_expr->get_expr_type());
   CK (OB_LIKELY(table_item.is_function_table()));
   CK (OB_NOT_NULL(function_expr));
   if (OB_SUCC(ret)) {
@@ -7874,7 +7877,8 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
     }
   } else if (T_FUN_SYS_READ_CSV == table_expr->get_expr_type()
              || T_FUN_SYS_READ_JSON == table_expr->get_expr_type()
-             || T_FUN_SYS_READ_NDJSON == table_expr->get_expr_type()) {
+             || T_FUN_SYS_READ_NDJSON == table_expr->get_expr_type()
+             || T_FUN_SYS_READ_PARQUET == table_expr->get_expr_type()) {
     // Discover the complete schema without retaining file rows in memory.
     // Only a literal path is accepted because output column types must be
     // known while resolving the query.
@@ -7917,35 +7921,55 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
         } else {
           FileSQLCsvReader csv_reader;
           FileSQLJsonlReader json_reader;
+          FileSQLParquetReader parquet_reader;
           const std::vector<FileSQLCsvReader::Column> *columns = NULL;
+          const std::vector<FileSQLParquetReader::Column> *parquet_columns = NULL;
           if (T_FUN_SYS_READ_CSV == table_expr->get_expr_type()) {
             if (csv_reader.open(actual_path)) columns = &csv_reader.columns();
+          } else if (T_FUN_SYS_READ_PARQUET == table_expr->get_expr_type()) {
+            if (parquet_reader.open(actual_path)) parquet_columns = &parquet_reader.columns();
           } else if (json_reader.open(actual_path)) {
             columns = &json_reader.columns();
           }
-          if (OB_ISNULL(columns)) {
+          if (OB_ISNULL(columns) && OB_ISNULL(parquet_columns)) {
             ret = OB_INVALID_ARGUMENT;
             LOG_USER_ERROR(OB_INVALID_ARGUMENT,
                            T_FUN_SYS_READ_CSV == table_expr->get_expr_type()
-                               ? csv_reader.error().c_str() : json_reader.error().c_str());
+                               ? csv_reader.error().c_str()
+                               : T_FUN_SYS_READ_PARQUET == table_expr->get_expr_type()
+                                   ? parquet_reader.error().c_str() : json_reader.error().c_str());
             LOG_WARN("failed to infer file schema", K(ret),
                      "csv_reason", csv_reader.error().c_str(),
-                     "json_reason", json_reader.error().c_str());
+                     "json_reason", json_reader.error().c_str(),
+                     "parquet_reason", parquet_reader.error().c_str());
           }
-          for (size_t i = 0; OB_SUCC(ret) && i < columns->size(); ++i) {
-            const FileSQLCsvReader::Column &column = (*columns)[i];
+          const size_t column_count = OB_NOT_NULL(parquet_columns)
+              ? parquet_columns->size() : (OB_NOT_NULL(columns) ? columns->size() : 0);
+          for (size_t i = 0; OB_SUCC(ret) && i < column_count; ++i) {
+            const std::string &column_name_text = OB_NOT_NULL(parquet_columns)
+                ? (*parquet_columns)[i].name : (*columns)[i].name;
             ObObjMeta meta;
-            switch (column.type) {
-              case FileSQLCsvReader::Type::BOOLEAN: meta.set_tinyint(); break;
-              case FileSQLCsvReader::Type::BIGINT: meta.set_int(); break;
-              case FileSQLCsvReader::Type::DOUBLE: meta.set_double(); break;
-              case FileSQLCsvReader::Type::DATE: meta.set_date(); break;
-              case FileSQLCsvReader::Type::DATETIME: meta.set_datetime(); break;
-              default:
+            if (OB_NOT_NULL(parquet_columns)) {
+              switch ((*parquet_columns)[i].type) {
+                case FileSQLParquetReader::Type::BOOLEAN: meta.set_tinyint(); break;
+                case FileSQLParquetReader::Type::BIGINT: meta.set_int(); break;
+                case FileSQLParquetReader::Type::DOUBLE: meta.set_double(); break;
+                default: meta.set_varchar(); break;
+              }
+            } else {
+              switch ((*columns)[i].type) {
+                case FileSQLCsvReader::Type::BOOLEAN: meta.set_tinyint(); break;
+                case FileSQLCsvReader::Type::BIGINT: meta.set_int(); break;
+                case FileSQLCsvReader::Type::DOUBLE: meta.set_double(); break;
+                case FileSQLCsvReader::Type::DATE: meta.set_date(); break;
+                case FileSQLCsvReader::Type::DATETIME: meta.set_datetime(); break;
+                default: meta.set_varchar(); break;
+              }
+            }
+            if (meta.get_type() == ObVarcharType) {
                 meta.set_varchar();
                 meta.set_collation_type(CS_TYPE_UTF8MB4_BIN);
                 meta.set_collation_level(CS_LEVEL_IMPLICIT);
-                break;
             }
             ObAccuracy accuracy = ObAccuracy::DDL_DEFAULT_ACCURACY[meta.get_type()];
             if (meta.get_type() == ObVarcharType) {
@@ -7955,7 +7979,7 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
             }
             ObString column_name;
             ColumnItem *file_col = NULL;
-            if (OB_FAIL(ob_write_string(*allocator_, ObString(column.name.length(), column.name.c_str()),
+            if (OB_FAIL(ob_write_string(*allocator_, ObString(column_name_text.length(), column_name_text.c_str()),
                                         column_name))) {
             } else if (OB_FAIL(resolve_function_table_column_item(table_item, meta, accuracy,
                                                                    column_name,
@@ -7987,7 +8011,8 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
       && T_FUN_SYS_READ_JSON != table_expr->get_expr_type()
       && T_FUN_SYS_READ_NDJSON != table_expr->get_expr_type()
       && T_FUN_SYS_FILE_GLOB != table_expr->get_expr_type()
-      && T_FUN_SYS_READ_CSV_SCHEMA != table_expr->get_expr_type()) {
+      && T_FUN_SYS_READ_CSV_SCHEMA != table_expr->get_expr_type()
+      && T_FUN_SYS_READ_PARQUET != table_expr->get_expr_type()) {
     CK (OB_NOT_NULL(col_item));
     OZ (col_items.push_back(*col_item));
   }
@@ -8718,7 +8743,8 @@ int ObDMLResolver::get_columns_from_table_item(const TableItem *table_item, ObIA
             || T_FUN_SYS_READ_JSON == function_expr->get_expr_type()
             || T_FUN_SYS_READ_NDJSON == function_expr->get_expr_type()
             || T_FUN_SYS_FILE_GLOB == function_expr->get_expr_type()
-            || T_FUN_SYS_READ_CSV_SCHEMA == function_expr->get_expr_type());
+            || T_FUN_SYS_READ_CSV_SCHEMA == function_expr->get_expr_type()
+            || T_FUN_SYS_READ_PARQUET == function_expr->get_expr_type());
     if (is_file_table) {
       for (int64_t i = 0; OB_SUCC(ret) && i < get_stmt()->get_column_size(); ++i) {
         const ColumnItem *item = get_stmt()->get_column_item(i);

@@ -2657,7 +2657,8 @@ bool ObResolverUtils::is_expr_can_be_used_in_table_function(const ObRawExpr &exp
              || T_FUN_SYS_READ_JSON == expr.get_expr_type()
              || T_FUN_SYS_READ_NDJSON == expr.get_expr_type()
              || T_FUN_SYS_FILE_GLOB == expr.get_expr_type()
-             || T_FUN_SYS_READ_CSV_SCHEMA == expr.get_expr_type()) {
+             || T_FUN_SYS_READ_CSV_SCHEMA == expr.get_expr_type()
+             || T_FUN_SYS_READ_PARQUET == expr.get_expr_type()) {
     // for stream table functions
     bret = true;
   }

@@ -83,6 +83,14 @@ public:
   {}
 };
 
+class FileSQLReadParquetExpr : public FileSQLReadCsvExpr
+{
+public:
+  explicit FileSQLReadParquetExpr(common::ObIAllocator &alloc)
+      : FileSQLReadCsvExpr(alloc, T_FUN_SYS_READ_PARQUET, N_READ_PARQUET)
+  {}
+};
+
 class FileSQLGlobExpr : public FileSQLReadCsvExpr
 {
 public:

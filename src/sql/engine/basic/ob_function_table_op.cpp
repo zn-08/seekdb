@@ -56,6 +56,9 @@ int ObFunctionTableOp::inner_open()
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_csv_schema;
     csv_schema_index_ = 0;
     ret = inner_open_csv();
+  } else if (T_FUN_SYS_READ_PARQUET == MY_SPEC.value_expr_->type_) {
+    next_row_func_ = &ObFunctionTableOp::inner_get_next_row_parquet;
+    ret = inner_open_parquet();
   } else if (T_FUN_SYS_READ_JSON == MY_SPEC.value_expr_->type_
              || T_FUN_SYS_READ_NDJSON == MY_SPEC.value_expr_->type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_json;
@@ -91,6 +94,12 @@ int ObFunctionTableOp::inner_rescan()
       LOG_WARN("JSONL file changed before rescan", K(ret), "reason", json_reader_.error().c_str());
     }
   } else if (OB_NOT_NULL(MY_SPEC.value_expr_)
+             && T_FUN_SYS_READ_PARQUET == MY_SPEC.value_expr_->type_) {
+    if (!parquet_reader_.rescan()) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("Parquet rescan failed", K(ret), "reason", parquet_reader_.error().c_str());
+    }
+  } else if (OB_NOT_NULL(MY_SPEC.value_expr_)
              && T_FUN_SYS_FILE_GLOB == MY_SPEC.value_expr_->type_) {
     glob_index_ = 0;
   } else {
@@ -115,6 +124,7 @@ int ObFunctionTableOp::inner_close()
   csv_reader_.close();
   csv_schema_index_ = 0;
   json_reader_.close();
+  parquet_reader_.close();
   glob_paths_.clear();
   glob_index_ = 0;
   return ret;
@@ -193,6 +203,43 @@ int ObFunctionTableOp::inner_open_json()
     } else if (MY_SPEC.column_indexes_.count() != MY_SPEC.column_exprs_.count()) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("JSONL projection is invalid", K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::inner_open_parquet()
+{
+  int ret = OB_SUCCESS;
+  ObDatum *path_datum = NULL;
+  ObString secure_file_priv;
+  char actual_path[PATH_MAX] = {0};
+  if (MY_SPEC.value_expr_->arg_cnt_ != 1 || OB_ISNULL(MY_SPEC.value_expr_->args_[0])) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(MY_SPEC.value_expr_->args_[0]->eval(eval_ctx_, path_datum))) {
+  } else if (OB_ISNULL(path_datum) || path_datum->is_null()) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    const ObString value = path_datum->get_string();
+    const std::string path(value.ptr(), value.length());
+    if (path.empty() || path.find('\0') != std::string::npos) {
+      ret = OB_INVALID_ARGUMENT;
+#ifdef _WIN32
+    } else if (OB_ISNULL(::_fullpath(actual_path, path.c_str(), sizeof(actual_path)))) {
+#else
+    } else if (OB_ISNULL(::realpath(path.c_str(), actual_path))) {
+#endif
+      ret = OB_FILE_NOT_EXIST;
+    } else if (OB_ISNULL(GET_MY_SESSION(ctx_))) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(GET_MY_SESSION(ctx_)->get_secure_file_priv(secure_file_priv))) {
+    } else if (OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, ObString(actual_path)))) {
+    } else if (!parquet_reader_.open(actual_path)) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, parquet_reader_.error().c_str());
+      LOG_WARN("failed to open Parquet table", K(ret), "reason", parquet_reader_.error().c_str());
+    } else if (MY_SPEC.column_indexes_.count() != MY_SPEC.column_exprs_.count()) {
+      ret = OB_ERR_UNEXPECTED;
     }
   }
   return ret;
@@ -359,6 +406,26 @@ int ObFunctionTableOp::inner_get_next_row_json()
       row.push_back(cell.text);
       nulls.push_back(cell.is_null);
     }
+    ret = write_file_row(row, &nulls);
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::inner_get_next_row_parquet()
+{
+  int ret = OB_SUCCESS;
+  clear_evaluated_flag();
+  std::vector<std::string> row;
+  std::vector<bool> nulls;
+  const FileSQLParquetReader::Status status = parquet_reader_.next(row, nulls);
+  if (status == FileSQLParquetReader::Status::END) {
+    ret = OB_ITER_END;
+  } else if (status == FileSQLParquetReader::Status::ERROR) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("failed to read Parquet row", K(ret), "reason", parquet_reader_.error().c_str());
+  } else if (row.size() != parquet_reader_.columns().size()) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
     ret = write_file_row(row, &nulls);
   }
   return ret;

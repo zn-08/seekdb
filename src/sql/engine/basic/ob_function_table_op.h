@@ -22,6 +22,7 @@
 #include "lib/charset/ob_charset.h"
 #include "sql/engine/basic/file_sql_csv_reader.h"
 #include "sql/engine/basic/file_sql_jsonl_reader.h"
+#include "sql/engine/basic/file_sql_parquet_reader.h"
 
 namespace oceanbase
 {
@@ -67,9 +68,11 @@ private:
   int inner_get_next_row_csv();
   int inner_get_next_row_csv_schema();
   int inner_get_next_row_json();
+  int inner_get_next_row_parquet();
   int inner_get_next_row_glob();
   int inner_open_csv();
   int inner_open_json();
+  int inner_open_parquet();
   int inner_open_glob();
   int write_file_row(const std::vector<std::string> &row, const std::vector<bool> *nulls);
   int get_current_result(common::ObObj &result);
@@ -82,6 +85,7 @@ private:
   FileSQLCsvReader csv_reader_;
   size_t csv_schema_index_ = 0;
   FileSQLJsonlReader json_reader_;
+  FileSQLParquetReader parquet_reader_;
   std::vector<std::string> glob_paths_;
   size_t glob_index_ = 0;
   int (ObFunctionTableOp::*next_row_func_)();
