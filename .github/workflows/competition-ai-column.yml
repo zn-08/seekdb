@@ -1,6 +1,6 @@
 name: Competition AI Column Test
 
-# Build a candidate branch and run the AI function test against it.
+# Build a candidate branch and run the AI column suite against it.
 #
 # The test talks to a mock AI service that answers the OpenAI compatible, the
 # SiliconFlow rerank and the Ollama endpoints, so the case runs without a model.
@@ -17,8 +17,6 @@ permissions:
 env:
   SEEKDB_PORT: '2881'
   MOCK_PORT: '8000'
-  CODE_REF: 'competition-ai-column'
-  TEST_NAME: 'ai_column_ddl'
 
 jobs:
   ai-test:
@@ -47,7 +45,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: code
-          ref: ${{ env.CODE_REF }}
+          ref: ${{ github.sha }}
           fetch-depth: 1
 
       - name: Install build environment
@@ -106,7 +104,7 @@ jobs:
           "$CLIENT" -h 127.0.0.1 -P "$SEEKDB_PORT" -uroot -A -D oceanbase < init.sql
           "$CLIENT" -h 127.0.0.1 -P "$SEEKDB_PORT" -uroot -A -D test < init_user.sql
 
-      - name: Run the AI function test
+      - name: Run the AI column tests
         shell: bash
         run: |
           set -uo pipefail
@@ -128,24 +126,30 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/mysqltest/tmp" "$GITHUB_WORKSPACE/mysqltest/log"
           cd code/tools/deploy
           set +e
-          "$CLIENT_ROOT/bin/mysqltest" \
-            --host=127.0.0.1 \
-            --port="$SEEKDB_PORT" \
-            --user=root \
-            --password= \
-            --database=test \
-            --tmpdir="$GITHUB_WORKSPACE/mysqltest/tmp" \
-            --logdir="$GITHUB_WORKSPACE/mysqltest/log" \
-            --silent \
-            --test-file=mysql_test/test_suite/ai_column/t/$TEST_NAME.test \
-            --result-file=mysql_test/test_suite/ai_column/r/mysql/$TEST_NAME.result \
-            --timer-file="$GITHUB_WORKSPACE/mysqltest/log/timer" \
-            --tail-lines=40 \
-            > "$GITHUB_WORKSPACE/mysqltest/stdout.txt" 2>&1
-          status=$?
+          status=0
+          for test_name in ai_column_ddl ai_column_t1_dml ai_column_worker ai_column_vector_index ai_column_retry_strict; do
+            "$CLIENT_ROOT/bin/mysqltest" \
+              --host=127.0.0.1 \
+              --port="$SEEKDB_PORT" \
+              --user=root \
+              --password= \
+              --database=test \
+              --tmpdir="$GITHUB_WORKSPACE/mysqltest/tmp" \
+              --logdir="$GITHUB_WORKSPACE/mysqltest/log" \
+              --silent \
+              --test-file=mysql_test/test_suite/ai_column/t/$test_name.test \
+              --result-file=mysql_test/test_suite/ai_column/r/mysql/$test_name.result \
+              --timer-file="$GITHUB_WORKSPACE/mysqltest/log/timer" \
+              --tail-lines=40 \
+              > "$GITHUB_WORKSPACE/mysqltest/$test_name.stdout.txt" 2>&1
+            test_status=$?
+            echo "===== $test_name (exit $test_status) ====="
+            cat "$GITHUB_WORKSPACE/mysqltest/$test_name.stdout.txt"
+            if [[ $test_status -ne 0 ]]; then status=1; fi
+          done
           set -e
           echo "===== mysqltest output ====="
-          cat "$GITHUB_WORKSPACE/mysqltest/stdout.txt"
+          find "$GITHUB_WORKSPACE/mysqltest" -name '*.stdout.txt' -maxdepth 1 -print
           echo "mysqltest exit code: $status"
           exit $status
 
@@ -159,7 +163,7 @@ jobs:
           echo "===== the reject file ====="
           find "$GITHUB_WORKSPACE/code/tools/deploy/mysql_test/test_suite/ai_column/r" -name '*.reject' -print -exec cat {} \; 2>/dev/null || true
           echo "===== the observer log ====="
-          tail -50 "$GITHUB_WORKSPACE/instance/log/observer.log" 2>/dev/null || true
+          tail -50 "$GITHUB_WORKSPACE/instance/log/seekdb.log" 2>/dev/null || true
 
       - name: Save the dependencies cache
         if: always()
