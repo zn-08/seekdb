@@ -676,6 +676,7 @@ int ObBootstrap::init_global_stat()
     } else if (OB_FAIL(global_stat_proxy.set_init_value(
                OB_CORE_SCHEMA_VERSION, OB_CORE_SCHEMA_VERSION, baseline_schema_version,
                snapshot_gc_scn, snapshot_gc_timestamp, ddl_epoch))) {
+      LOG_ERROR("failed to initialize global stat during bootstrap", KR(ret));
     }
 
     int temp_ret = OB_SUCCESS;

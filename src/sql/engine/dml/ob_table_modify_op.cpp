@@ -1109,20 +1109,30 @@ int ObTableModifyOp::maintain_ai_column_tasks(const ObDMLBaseCtDef &ctdef,
   if (!ctdef.is_primary_index_) {
     return ret;
   }
+  // System bootstrap and the AI worker both execute through inner SQL
+  // connections. Their writes must not recursively enqueue user AI tasks.
+  if (OB_NOT_NULL(ctx_.get_my_session()) && ctx_.get_my_session()->is_inner()) {
+    return ret;
+  }
   const uint64_t table_id = ctdef.das_base_ctdef_.table_id_;
   // Bootstrap writes core system tables before the complete schema guard exists.
   // AI columns are only supported on user tables, so leave those writes alone.
-  if (is_system_table(table_id)) {
+  if (is_inner_table(table_id)) {
     return ret;
   }
   ObSchemaGetterGuard *guard = ctx_.get_sql_ctx()->schema_guard_;
   const ObTableSchema *table_schema = NULL;
   bool has_ai_column = false;
   if (OB_ISNULL(guard)) {
-    ret = OB_ERR_UNEXPECTED;
+    // Schema-less bootstrap DML cannot target a user AI column.
   } else if (OB_FAIL(guard->get_table_schema(table_id, table_schema))) {
+    if (OB_SCHEMA_ERROR == ret || OB_TABLE_NOT_EXIST == ret) {
+      LOG_INFO("skip AI column maintenance without a published table schema", K(table_id), KR(ret));
+      ret = OB_SUCCESS;
+    }
   } else if (OB_ISNULL(table_schema)) {
-    ret = OB_SCHEMA_ERROR;
+    // The base DML path will report a missing user table if this is not a
+    // bootstrap statement; AI maintenance has nothing to do without schema.
   } else {
     for (ObTableSchema::const_column_iterator it = table_schema->column_begin();
          it != table_schema->column_end(); ++it) {
