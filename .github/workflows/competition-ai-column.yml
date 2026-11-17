@@ -57,7 +57,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             git wget rpm rpm2cpio cpio make build-essential binutils m4 \
             libtool-bin libncurses5 python3 python3-pip \
-            libncurses-dev libaio-dev libaio1 libtool-bin
+            libncurses-dev libaio-dev libaio1 libtool-bin ccache
 
       - name: Cache dependencies
         uses: actions/cache@v4
@@ -65,14 +65,26 @@ jobs:
           key: ${{ runner.os }}-build-competition-ai-el9.x86_64-${{ hashFiles('code/deps/init/oceanbase.el9.x86_64.deps') }}
           path: code/deps/3rd
 
+      - name: Cache compiler output
+        uses: actions/cache@v4
+        with:
+          key: ${{ runner.os }}-ai-column-ccache-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-ai-column-ccache-
+          path: ~/.cache/ccache
+
       - name: Build the candidate
         shell: bash
         run: |
           set -uo pipefail
           if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
+          export CCACHE_BASEDIR="$GITHUB_WORKSPACE/code"
+          export CCACHE_COMPILERCHECK=content
+          ccache --max-size=5G
           cd code
           {
-            ./build.sh release --init
+            ./build.sh release --init \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
             make -C build_release -j4
           } 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
           status=${PIPESTATUS[0]}
@@ -100,9 +112,8 @@ jobs:
             --port "$SEEKDB_PORT" \
             --user root \
             --timeout 180
-          cd code/tools/deploy
-          "$CLIENT" -h 127.0.0.1 -P "$SEEKDB_PORT" -uroot -A -D oceanbase < init.sql
-          "$CLIENT" -h 127.0.0.1 -P "$SEEKDB_PORT" -uroot -A -D test < init_user.sql
+          "$CLIENT" -h 127.0.0.1 -P "$SEEKDB_PORT" -uroot -A \
+            -e 'CREATE DATABASE IF NOT EXISTS test'
 
       - name: Run the AI column tests
         shell: bash
