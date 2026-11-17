@@ -630,6 +630,7 @@ ObServer::ObServer()
     sql_mem_task_(),
     ctas_clean_up_task_(),
     refresh_cpu_frequency_task_(),
+    ai_column_worker_task_(),
     schema_status_proxy_(sql_proxy_),
     is_log_dir_empty_(false),
     conn_res_mgr_(),
@@ -850,6 +851,8 @@ int ObServer::init(const ObServerOptions &opts, const ObPLogWriterCfg &log_cfg)
       LOG_ERROR("init redef heart beat task failed", KR(ret));
     } else if (OB_FAIL(init_refresh_cpu_frequency())) {
       LOG_ERROR("init refresh cpu frequency failed", KR(ret));
+    } else if (OB_FAIL(init_ai_column_worker())) {
+      LOG_ERROR("init AI column worker failed", KR(ret));
     } else if (OB_FAIL(ObOptStatManager::get_instance().init(&sql_proxy_))) {
       LOG_ERROR("init opt stat manager failed", KR(ret));
     } else if (OB_FAIL(ObSysTaskStatMgr::get_instance().set_self_addr(self_addr_))) {
@@ -2855,6 +2858,34 @@ int ObServer::init_refresh_cpu_frequency()
   if (OB_FAIL(refresh_cpu_frequency_task_.init(this, server_gtimer_))) {
   }
   return ret;
+}
+
+int ObServer::ObAiColumnWorkerTask::init(common::ObTimer &timer)
+{
+  int ret = OB_SUCCESS;
+  if (is_inited_) {
+    ret = OB_INIT_TWICE;
+  } else if (OB_FAIL(timer.schedule(*this, 200 * 1000L, true))) {
+  } else {
+    is_inited_ = true;
+    disable_timeout_check();
+  }
+  return ret;
+}
+
+void ObServer::ObAiColumnWorkerTask::runTimerTask()
+{
+  if (is_inited_) {
+    int ret = share::ObAiServiceExecutor::run_ai_column_task_once();
+    if (OB_SUCCESS != ret && OB_TABLE_NOT_EXIST != ret && OB_SCHEMA_EAGAIN != ret) {
+      LOG_WARN("AI column worker iteration failed", KR(ret));
+    }
+  }
+}
+
+int ObServer::init_ai_column_worker()
+{
+  return ai_column_worker_task_.init(server_gtimer_);
 }
 
 // @@Query cleanup rules for built tables and temporary tables:

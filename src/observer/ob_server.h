@@ -293,6 +293,16 @@ public:
     bool is_inited_;
   };
 
+  class ObAiColumnWorkerTask: public common::ObTimerTask
+  {
+  public:
+    ObAiColumnWorkerTask() : is_inited_(false) {}
+    int init(common::ObTimer &timer);
+    virtual void runTimerTask() override;
+  private:
+    bool is_inited_;
+  };
+
   class ObCTASCleanUp
   {
   public:
@@ -386,6 +396,7 @@ private:
   int init_redef_heart_beat_task();
   int init_ddl_heart_beat_task_container();
   int init_refresh_cpu_frequency();
+  int init_ai_column_worker();
   int set_running_mode();
   int initialize_server_runtime();
   int wait_for_server_runtime();
@@ -488,6 +499,7 @@ private:
   ObCTASCleanUpTask ctas_clean_up_task_;     // repeat & no retry
   ObRedefTableHeartBeatTask redef_table_heart_beat_task_;
   ObRefreshCpuFreqTimeTask refresh_cpu_frequency_task_;
+  ObAiColumnWorkerTask ai_column_worker_task_;
   blocksstable::ObStorageEnv storage_env_;
   share::ObSchemaStatusProxy schema_status_proxy_;
 

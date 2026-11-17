@@ -23,6 +23,7 @@
 #include "share/ob_max_id_fetcher.h"
 #include "observer/ob_inner_sql_connection.h"
 #include "storage/tablelock/ob_lock_inner_connection_util.h"
+#include "lib/string/ob_sql_string.h"
 
 #define USING_LOG_PREFIX SHARE
 
@@ -35,6 +36,29 @@ namespace share
 {
 
 namespace {
+int append_ai_sql_identifier(ObSqlString &sql, const ObString &name)
+{
+  int ret = sql.append("`");
+  for (int64_t i = 0; OB_SUCC(ret) && i < name.length(); ++i) {
+    if ('`' == name.ptr()[i] && OB_FAIL(sql.append("`"))) {
+    } else if (OB_FAIL(sql.append_fmt("%c", name.ptr()[i]))) {
+    }
+  }
+  if (OB_SUCC(ret)) { ret = sql.append("`"); }
+  return ret;
+}
+
+int append_ai_sql_hex(ObSqlString &sql, const ObString &value)
+{
+  int ret = sql.append("X'");
+  for (int64_t i = 0; OB_SUCC(ret) && i < value.length(); ++i) {
+    if (OB_FAIL(sql.append_fmt("%02X", static_cast<unsigned char>(value.ptr()[i])))) {
+    }
+  }
+  if (OB_SUCC(ret)) { ret = sql.append("'"); }
+  return ret;
+}
+
 int local_get_runtime_name_case_mode(ObNameCaseMode &name_case_mode)
 {
   int ret = OB_SUCCESS;
@@ -73,6 +97,201 @@ int local_check_ai_model_exists(const ObString &ai_model_name)
 const int64_t ObAiServiceExecutor::SPECIAL_ENDPOINT_ID_FOR_VERSION = -1;
 const int64_t ObAiServiceExecutor::INIT_ENDPOINT_VERSION = 0;
 const char *ObAiServiceExecutor::SPECIAL_ENDPOINT_SCOPE_FOR_VERSION = "";
+
+int ObAiServiceExecutor::run_ai_column_task_once()
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(GCTX.sql_proxy_)) {
+    return OB_NOT_INIT;
+  }
+  ObArenaAllocator allocator("AiColWorker");
+  uint64_t table_id = 0;
+  uint64_t column_id = 0;
+  int64_t retry_count = 0;
+  int64_t max_retries = 0;
+  ObString request_id;
+  ObString predicate;
+  ObString expression;
+  ObString column_name;
+  ObString table_name;
+  ObString database_name;
+  bool found = false;
+  SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+    const char *sql =
+        "SELECT task.table_id, task.column_id, task.request_id, "
+        "task.rowkey_predicate, task.retry_count, ai.max_retries, "
+        "ai.normalized_expr, ai.column_name, t.table_name, d.database_name "
+        "FROM oceanbase.__all_ai_column_task task "
+        "JOIN oceanbase.__all_ai_column ai ON ai.table_id=task.table_id "
+        "AND ai.column_id=task.column_id "
+        "JOIN oceanbase.__all_table t ON t.table_id=task.table_id "
+        "JOIN oceanbase.__all_database d ON d.database_id=t.database_id "
+        "WHERE task.state IN (0,1,3) AND task.eligible_ts<=NOW(6) "
+        "ORDER BY task.eligible_ts LIMIT 1";
+    int64_t id_value = 0;
+    ObString value;
+    if (OB_FAIL(GCTX.sql_proxy_->read(res, sql))) {
+    } else if (OB_ISNULL(res.get_result())) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(res.get_result()->next())) {
+      if (OB_ITER_END == ret) { ret = OB_SUCCESS; }
+    } else {
+      found = true;
+      if (OB_FAIL(res.get_result()->get_int("table_id", id_value))) {
+      } else if (FALSE_IT(table_id = static_cast<uint64_t>(id_value))) {
+      } else if (OB_FAIL(res.get_result()->get_int("column_id", id_value))) {
+      } else if (FALSE_IT(column_id = static_cast<uint64_t>(id_value))) {
+      } else if (OB_FAIL(res.get_result()->get_int("retry_count", retry_count))) {
+      } else if (OB_FAIL(res.get_result()->get_int("max_retries", max_retries))) {
+      } else if (OB_FAIL(res.get_result()->get_varchar("request_id", value))) {
+      } else if (OB_FAIL(ob_write_string(allocator, value, request_id))) {
+      } else if (OB_FAIL(res.get_result()->get_varchar("rowkey_predicate", value))) {
+      } else if (OB_FAIL(ob_write_string(allocator, value, predicate))) {
+      } else if (OB_FAIL(res.get_result()->get_varchar("normalized_expr", value))) {
+      } else if (OB_FAIL(ob_write_string(allocator, value, expression))) {
+      } else if (OB_FAIL(res.get_result()->get_varchar("column_name", value))) {
+      } else if (OB_FAIL(ob_write_string(allocator, value, column_name))) {
+      } else if (OB_FAIL(res.get_result()->get_varchar("table_name", value))) {
+      } else if (OB_FAIL(ob_write_string(allocator, value, table_name))) {
+      } else if (OB_FAIL(res.get_result()->get_varchar("database_name", value))) {
+      } else if (OB_FAIL(ob_write_string(allocator, value, database_name))) {
+      }
+    }
+    if (OB_NOT_NULL(res.get_result())) {
+      const int close_ret = res.get_result()->close();
+      if (OB_SUCC(ret) && OB_SUCCESS != close_ret) { ret = close_ret; }
+    }
+  }
+  if (OB_FAIL(ret) || !found) {
+    return ret;
+  }
+
+  ObSqlString task_key;
+  ObSqlString sql;
+  int64_t affected_rows = 0;
+  if (OB_FAIL(task_key.assign_fmt("table_id=%lu AND column_id=%lu AND request_id=",
+                                   static_cast<unsigned long>(table_id),
+                                   static_cast<unsigned long>(column_id)))) {
+  } else if (OB_FAIL(append_ai_sql_hex(task_key, request_id))) {
+  } else if (OB_FAIL(sql.assign_fmt(
+                 "UPDATE oceanbase.__all_ai_column_task SET state=1, "
+                 "eligible_ts=DATE_ADD(NOW(6),INTERVAL 10 SECOND) "
+                 "WHERE %.*s AND state IN (0,1,3) AND eligible_ts<=NOW(6)",
+                 task_key.length(), task_key.ptr()))) {
+  } else if (OB_FAIL(GCTX.sql_proxy_->write(sql.ptr(), affected_rows))) {
+  }
+  if (OB_FAIL(ret) || 1 != affected_rows) {
+    return ret;
+  }
+
+  ObSqlString value_query;
+  ObString generated_value;
+  bool row_exists = false;
+  if (OB_FAIL(value_query.append("SELECT CAST(("))) {
+  } else if (OB_FAIL(value_query.append_fmt("%.*s", expression.length(), expression.ptr()))) {
+  } else if (OB_FAIL(value_query.append(") AS CHAR) AS generated_value FROM "))) {
+  } else if (OB_FAIL(append_ai_sql_identifier(value_query, database_name))) {
+  } else if (OB_FAIL(value_query.append("."))) {
+  } else if (OB_FAIL(append_ai_sql_identifier(value_query, table_name))) {
+  } else if (OB_FAIL(value_query.append_fmt(" WHERE %.*s LIMIT 1",
+                                             predicate.length(), predicate.ptr()))) {
+  }
+  if (OB_SUCC(ret)) {
+    SMART_VAR(ObMySQLProxy::MySQLResult, value_res) {
+      ObString value;
+      if (OB_FAIL(GCTX.sql_proxy_->read(value_res, value_query.ptr()))) {
+      } else if (OB_ISNULL(value_res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(value_res.get_result()->next())) {
+        if (OB_ITER_END == ret) { ret = OB_SUCCESS; }
+      } else if (OB_FAIL(value_res.get_result()->get_varchar("generated_value", value))) {
+      } else if (OB_FAIL(ob_write_string(allocator, value, generated_value))) {
+      } else {
+        row_exists = true;
+      }
+      if (OB_NOT_NULL(value_res.get_result())) {
+        const int close_ret = value_res.get_result()->close();
+        if (OB_SUCC(ret) && OB_SUCCESS != close_ret) { ret = close_ret; }
+      }
+    }
+  }
+
+  const bool model_failed = OB_FAIL(ret);
+  if (model_failed && retry_count < max_retries) {
+    sql.reset();
+    int retry_ret = sql.assign_fmt(
+        "UPDATE oceanbase.__all_ai_column_task SET state=3, "
+        "retry_count=retry_count+1, "
+        "eligible_ts=DATE_ADD(NOW(6),INTERVAL 1 SECOND) "
+        "WHERE %.*s AND state=1", task_key.length(), task_key.ptr());
+    if (OB_SUCCESS == retry_ret) {
+      int64_t rows = 0;
+      retry_ret = GCTX.sql_proxy_->write(sql.ptr(), rows);
+    }
+    return retry_ret;
+  }
+
+  ObMySQLTransaction trans;
+  int publish_ret = trans.start(GCTX.sql_proxy_);
+  bool task_exists = false;
+  if (OB_SUCCESS == publish_ret) {
+    sql.reset();
+    publish_ret = sql.assign_fmt(
+        "SELECT 1 FROM oceanbase.__all_ai_column_task WHERE %.*s AND state=1 FOR UPDATE",
+        task_key.length(), task_key.ptr());
+  }
+  if (OB_SUCCESS == publish_ret) {
+    SMART_VAR(ObMySQLProxy::MySQLResult, check_res) {
+      if (OB_SUCCESS != (publish_ret = trans.read(check_res, sql.ptr()))) {
+      } else if (OB_ISNULL(check_res.get_result())) {
+        publish_ret = OB_ERR_UNEXPECTED;
+      } else if (OB_SUCCESS == (publish_ret = check_res.get_result()->next())) {
+        task_exists = true;
+      } else if (OB_ITER_END == publish_ret) {
+        publish_ret = OB_SUCCESS;
+      }
+      if (OB_NOT_NULL(check_res.get_result())) {
+        const int close_ret = check_res.get_result()->close();
+        if (OB_SUCCESS == publish_ret && OB_SUCCESS != close_ret) { publish_ret = close_ret; }
+      }
+    }
+  }
+  if (OB_SUCCESS == publish_ret && task_exists && row_exists) {
+    sql.reset();
+    if (OB_SUCCESS != (publish_ret = sql.append("UPDATE "))) {
+    } else if (OB_SUCCESS != (publish_ret = append_ai_sql_identifier(sql, database_name))) {
+    } else if (OB_SUCCESS != (publish_ret = sql.append("."))) {
+    } else if (OB_SUCCESS != (publish_ret = append_ai_sql_identifier(sql, table_name))) {
+    } else if (OB_SUCCESS != (publish_ret = sql.append(" SET "))) {
+    } else if (OB_SUCCESS != (publish_ret = append_ai_sql_identifier(sql, column_name))) {
+    } else if (OB_SUCCESS != (publish_ret = sql.append("="))) {
+    } else if (model_failed) {
+      publish_ret = sql.append("NULL");
+    } else if (OB_SUCCESS != (publish_ret = append_ai_sql_hex(sql, generated_value))) {
+    }
+    if (OB_SUCCESS == publish_ret) {
+      if (OB_SUCCESS != (publish_ret = sql.append_fmt(
+              ", `__ai_state_%lu`=%d WHERE %.*s",
+              static_cast<unsigned long>(column_id), model_failed ? 2 : 1,
+              predicate.length(), predicate.ptr()))) {
+      } else if (OB_SUCCESS != (publish_ret = trans.write(sql.ptr(), affected_rows))) {
+      }
+    }
+  }
+  if (OB_SUCCESS == publish_ret && task_exists) {
+    sql.reset();
+    if (OB_SUCCESS != (publish_ret = sql.assign_fmt(
+            "DELETE FROM oceanbase.__all_ai_column_task WHERE %.*s AND state=1",
+            task_key.length(), task_key.ptr()))) {
+    } else if (OB_SUCCESS != (publish_ret = trans.write(sql.ptr(), affected_rows))) {
+    }
+  }
+  if (trans.is_started()) {
+    const int end_ret = trans.end(OB_SUCCESS == publish_ret);
+    if (OB_SUCCESS == publish_ret) { publish_ret = end_ret; }
+  }
+  return publish_ret;
+}
 
 int ObAiServiceExecutor::create_ai_model_endpoint(common::ObArenaAllocator &allocator, const ObString &endpoint_name, const ObIJsonBase &create_jbase)
 {

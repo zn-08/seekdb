@@ -36,6 +36,7 @@ public:
   static int drop_ai_model_endpoint(const ObString &endpoint_name);
   static int read_ai_endpoint(ObArenaAllocator &allocator, const ObString &endpoint_name, ObAiModelEndpointInfo &endpoint_info);
   static int read_ai_endpoint_by_ai_model_name(ObArenaAllocator &allocator, const ObString &ai_model_name, ObAiModelEndpointInfo &endpoint_info);
+  static int run_ai_column_task_once();
 
 private:
   static const int64_t SPECIAL_ENDPOINT_ID_FOR_VERSION;

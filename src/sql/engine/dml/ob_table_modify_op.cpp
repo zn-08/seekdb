@@ -1069,7 +1069,7 @@ static int ai_column_value_changed(ObEvalCtx &eval_ctx,
                                    bool &changed)
 {
   int ret = OB_SUCCESS;
-  changed = true;
+  changed = false;
   for (int64_t i = 0; i < ctdef.column_ids_.count(); ++i) {
     if (column_id == ctdef.column_ids_.at(i) &&
         i < ctdef.old_row_.count() && i < ctdef.new_row_.count()) {
