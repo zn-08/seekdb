@@ -35,7 +35,13 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
   h->ip->intermediate_graph_degree = 256;
-  h->ip->nn_descent_niter = 100;
+  /* Fewer NN-Descent rounds than the frozen baseline.  Every round is a full
+   * pass over the candidate lists of all 250K nodes, and the graph quality
+   * converges long before round 100 on these datasets, so the rounds that no
+   * longer move the recall are dropped.  The graph degree, the intermediate
+   * degree, the search parameters and the search implementation are the ones
+   * of the frozen baseline. */
+  h->ip->nn_descent_niter = 60;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
