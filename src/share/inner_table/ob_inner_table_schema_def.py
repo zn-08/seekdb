@@ -2487,8 +2487,8 @@ def_table_schema(
     normal_columns = [
         ('rowkey_predicate', 'varchar:2048', 'false'),
         ('definition_version', 'int', 'false'),
-        ('status', 'varchar:16', 'false'),
-        ('attempts', 'int', 'false'),
+        ('state', 'int', 'false'),
+        ('retry_count', 'int', 'false'),
         ('eligible_ts', 'timestamp', 'false')
     ]
 )

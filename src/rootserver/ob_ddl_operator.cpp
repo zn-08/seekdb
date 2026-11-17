@@ -589,7 +589,7 @@ int ObDDLOperator::persist_ai_column_definitions(const ObTableSchema &table_sche
         } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("request_column_id", hidden_ids[1]))) {
         } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("result_spec_column_id", hidden_ids[2]))) {
         } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("normalized_expr", ObHexEscapeSqlStr(ObString::make_string(normalized_expr.ptr()))))) {
-        } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("dependency_column_ids", ObHexEscapeSqlStr(ObString::make_string(""))))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("dependency_column_ids", ObHexEscapeSqlStr(column->get_ai_column_dependencies())))) {
         } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("sync_mode", ObHexEscapeSqlStr(ObString::make_string("async"))))) {
         } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("max_retries", column->get_ai_column_max_retries()))) {
         } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("definition_version", table_schema.get_schema_version()))) {

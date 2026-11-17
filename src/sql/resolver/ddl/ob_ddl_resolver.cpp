@@ -1934,14 +1934,22 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
         }
       }
     }
+    ObSqlString dependency_ids;
     for (ObTableSchema::const_column_iterator it = table_schema.column_begin();
          OB_SUCC(ret) && it != table_schema.column_end(); ++it) {
       const ObColumnSchemaV2 *dependency = *it;
-      if (NULL != dependency && dependency->is_ai_column() &&
+      if (NULL != dependency &&
           ai_expr_references_column(expr_node, dependency->get_column_name_str())) {
-        ret = OB_NOT_SUPPORTED;
-        LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN dependency on another AI COLUMN is");
+        if (dependency->is_ai_column()) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN dependency on another AI COLUMN is");
+        } else if (OB_FAIL(dependency_ids.append_fmt("%s%lu",
+                           dependency_ids.empty() ? "" : ",",
+                           static_cast<unsigned long>(dependency->get_column_id())))) {
+        }
       }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(column.set_ai_column_dependencies(dependency_ids.string()))) {
     }
     for (int64_t i = 0; OB_SUCC(ret) && NULL != options_node && i < options_node->num_child_; i += 2) {
       if (i + 1 >= options_node->num_child_ ||

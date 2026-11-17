@@ -84,6 +84,7 @@ int ObColumnSchemaV2::assign(const ObColumnSchemaV2 &src_schema)
     } else if (OB_FAIL(deep_copy_str(src_schema.column_name_, column_name_))) {
     } else if (OB_FAIL(deep_copy_str(src_schema.comment_, comment_))) {
     } else if (OB_FAIL(deep_copy_str(src_schema.ai_column_expr_, ai_column_expr_))) {
+    } else if (OB_FAIL(deep_copy_str(src_schema.ai_column_dependencies_, ai_column_dependencies_))) {
     } else if (OB_FAIL(set_extended_type_info(src_schema.extended_type_info_))) {
     } else if (src_schema.column_ref_idxs_ != NULL) {
       if (OB_FAIL(alloc_column_ref_set())) {
@@ -123,6 +124,7 @@ int64_t ObColumnSchemaV2::get_convert_size() const
   convert_size += column_name_.length() + 1;
   convert_size += comment_.length() + 1;
   convert_size += ai_column_expr_.length() + 1;
+  convert_size += ai_column_dependencies_.length() + 1;
   if (column_ref_idxs_ != NULL) {
     convert_size += sizeof(ColumnReferenceSet);
   }
@@ -180,6 +182,7 @@ void ObColumnSchemaV2::reset()
   column_name_.reset();
   comment_.reset();
   ai_column_expr_.reset();
+  ai_column_dependencies_.reset();
   ai_column_max_retries_ = 0;
   column_flags_ = NON_CASCADE_FLAG;
   column_ref_idxs_ = NULL;
@@ -242,6 +245,7 @@ OB_DEF_SERIALIZE(ObColumnSchemaV2)
                 lob_chunk_size_,
                 local_session_vars_,
                 ai_column_expr_,
+                ai_column_dependencies_,
                 ai_column_max_retries_);
   }
 
@@ -256,6 +260,7 @@ OB_DEF_DESERIALIZE(ObColumnSchemaV2)
   ObString column_name;
   ObString comment;
   ObString ai_column_expr;
+  ObString ai_column_dependencies;
   bool has_column_ref = false;
 
   LST_DO_CODE(OB_UNIS_DECODE,
@@ -305,8 +310,10 @@ OB_DEF_DESERIALIZE(ObColumnSchemaV2)
                 lob_chunk_size_,
                 local_session_vars_,
                 ai_column_expr,
+                ai_column_dependencies,
                 ai_column_max_retries_);
     if (OB_SUCC(ret) && OB_FAIL(deep_copy_str(ai_column_expr, ai_column_expr_))) {
+    } else if (OB_SUCC(ret) && OB_FAIL(deep_copy_str(ai_column_dependencies, ai_column_dependencies_))) {
     }
   }
   return ret;
@@ -354,6 +361,7 @@ OB_DEF_SERIALIZE_SIZE(ObColumnSchemaV2)
               lob_chunk_size_,
               local_session_vars_,
               ai_column_expr_,
+              ai_column_dependencies_,
               ai_column_max_retries_);
   return len;
 }

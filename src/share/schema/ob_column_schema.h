@@ -142,6 +142,7 @@ int assign(const ObColumnSchemaV2 &src_schema);
   inline int set_comment(const char *comment) { return deep_copy_str(comment, comment_); }
   inline int set_comment(const common::ObString &comment) { return deep_copy_str(comment, comment_); }
   inline int set_ai_column_expr(const common::ObString &expr) { return deep_copy_str(expr, ai_column_expr_); }
+  inline int set_ai_column_dependencies(const common::ObString &deps) { return deep_copy_str(deps, ai_column_dependencies_); }
   inline void set_ai_column_max_retries(const int64_t retries) { ai_column_max_retries_ = retries; }
   inline void set_on_update_current_timestamp(const bool is_on_update_for_timestamp) { on_update_current_timestamp_ = is_on_update_for_timestamp; }
   int set_extended_type_info(const common::ObIArray<common::ObString> &info);
@@ -216,6 +217,7 @@ int assign(const ObColumnSchemaV2 &src_schema);
   inline const common::ObString &get_comment_str() const { return comment_; }
   inline bool is_ai_column() const { return 0 != (column_flags_ & AI_COLUMN_FLAG); }
   inline const common::ObString &get_ai_column_expr() const { return ai_column_expr_; }
+  inline const common::ObString &get_ai_column_dependencies() const { return ai_column_dependencies_; }
   inline int64_t get_ai_column_max_retries() const { return ai_column_max_retries_; }
   inline const common::ObIArray<common::ObString> &get_extended_type_info() const { return extended_type_info_; }
   inline common::ObIArray<common::ObString> &get_extended_type_info() { return extended_type_info_; }
@@ -387,6 +389,7 @@ private:
   common::ObString comment_;
   // DDL payload; durable AI definitions are stored in __all_ai_column.
   common::ObString ai_column_expr_;
+  common::ObString ai_column_dependencies_;
   int64_t ai_column_max_retries_;
   common::ObArrayHelper<common::ObString> extended_type_info_;//used for enum and set
   uint64_t prev_column_id_;
