@@ -231,6 +231,8 @@ public:
   int end_nested_session();
   int execute_write(const char *sql);
   int execute_read(const char *sql, common::ObMySQLProxy::MySQLResult &res);
+  int maintain_ai_column_tasks(const ObDMLBaseCtDef &ctdef,
+                               const bool is_insert, const bool is_delete);
   int check_stack();
   bool is_nested_session() { return ObSQLUtils::is_nested_sql(&ctx_); }
   bool is_fk_nested_session() { return ObSQLUtils::is_fk_nested_sql(&ctx_); }
@@ -313,6 +315,7 @@ public:
   ObDMLModifyRowsList dml_modify_rows_;
   ObSEArray<ObForeignKeyChecker *, 4> fk_checkers_;
   ObChunkDatumStore::ShadowStoredRow last_store_row_;
+  uint64_t ai_request_seq_;
 private:
   ObSQLSessionInfo::StmtSavedValue *saved_session_;
   char saved_session_buf_[sizeof(ObSQLSessionInfo::StmtSavedValue)] __attribute__((aligned (16)));;
