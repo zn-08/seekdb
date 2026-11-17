@@ -1309,12 +1309,28 @@ int ObAIFuncModel::call_completion(ObString &prompt, ObJsonObject *config, ObStr
   } else if (OB_FAIL(ObAIFuncUtils::get_complete_provider(*allocator_, endpoint_info_.get_provider(), complete_provider))) {
   } else if (OB_FAIL(endpoint_info_.get_unencrypted_access_key(*allocator_, unencrypted_access_key))) {
   } else if (OB_FAIL(complete_provider->get_header(*allocator_, unencrypted_access_key, headers))) {
-  } else if (OB_FAIL(complete_provider->get_body(*allocator_, request_model_name, prompt_str, prompt, config, body))) {
-  } else if (OB_FAIL(client.send_post(*allocator_, endpoint_info_.get_url(), headers, body, response))) {
-  } else if (OB_FAIL(complete_provider->parse_output(*allocator_, response, result_base))) {
-  } else if (OB_FAIL(ObAIFuncJsonUtils::print_json_to_str(*allocator_, result_base, result_str))) {
-  } else {
-    result = result_str;
+  } else if (OB_NOT_NULL(config) && OB_NOT_NULL(config->get_value("system_prompt"))) {
+    ObJsonNode *prompt_node = config->get_value("system_prompt");
+    if (prompt_node->json_type() != ObJsonNodeType::J_STRING) {
+      ret = OB_INVALID_ARGUMENT;
+    } else {
+      if (OB_FAIL(ob_write_string(*allocator_,
+                                  static_cast<ObJsonString *>(prompt_node)->get_str(),
+                                  prompt_str))) {
+      } else if (OB_FAIL(config->remove("system_prompt"))) {
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(complete_provider->get_body(*allocator_, request_model_name,
+                                            prompt_str, prompt, config, body))) {
+    } else if (OB_FAIL(client.send_post(*allocator_, endpoint_info_.get_url(),
+                                         headers, body, response))) {
+    } else if (OB_FAIL(complete_provider->parse_output(*allocator_, response, result_base))) {
+    } else if (OB_FAIL(ObAIFuncJsonUtils::print_json_to_str(*allocator_, result_base, result_str))) {
+    } else {
+      result = result_str;
+    }
   }
   if (ret == OB_INVALID_DATA) {
     ObString response_str;

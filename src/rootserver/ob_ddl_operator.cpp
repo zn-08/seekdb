@@ -39,6 +39,7 @@
 #include "pl/pl_cache/ob_pl_cache_mgr.h"
 #include "share/schema/ob_dependency_info.h"  // relocated-definition owner
 #include "share/schema/ob_multi_version_schema_service.h"  // relocated-definition owner
+#include <ctype.h>
 
 namespace oceanbase
 {
@@ -576,9 +577,18 @@ int ObDDLOperator::persist_ai_column_definitions(const ObTableSchema &table_sche
         ObSqlString normalized_expr;
         int64_t affected_rows = 0;
         const ObString &expr = column->get_ai_column_expr();
-        if (column->is_json()) {
-          ret = normalized_expr.assign_fmt("%.*s Return exactly one valid JSON value",
-                                           expr.length(), expr.ptr());
+        const char *type_prompt = column->is_json()
+            ? "Return exactly one valid JSON value"
+            : (column->get_meta_type().is_integer_type()
+               ? "Return exactly one base-10 integer" : NULL);
+        int64_t expr_end = expr.length();
+        while (expr_end > 0 && isspace(static_cast<unsigned char>(expr.ptr()[expr_end - 1]))) {
+          --expr_end;
+        }
+        if (NULL != type_prompt && expr_end > 0 && ')' == expr.ptr()[expr_end - 1]) {
+          ret = normalized_expr.assign_fmt(
+              "%.*s, JSON_OBJECT('system_prompt', '%s'))",
+              static_cast<int>(expr_end - 1), expr.ptr(), type_prompt);
         } else {
           ret = normalized_expr.assign_fmt("%.*s", expr.length(), expr.ptr());
         }
