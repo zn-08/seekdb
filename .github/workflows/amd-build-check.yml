@@ -1,0 +1,91 @@
+name: AMD Build Check
+
+# Compile check for the AMD contest branch.
+#
+# The evaluation links the real hipVS/cuVS bridge, which needs an AMD GPU stack.
+# The hosted runner has no GPU, so the build is checked against a stub bridge
+# that exports the same C ABI.  That still compiles and links the whole
+# -DOB_BUILD_CUVS=ON server the evaluation builds.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 2026-competition-amd
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build with the cuVS backend enabled
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Free Disk Space
+        uses: insightsengineering/disk-space-reclaimer@v1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+          docker-images: true
+          tools-cache: false
+
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Install build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git wget rpm rpm2cpio cpio make build-essential binutils m4 \
+            libtool-bin libncurses5 python3 python3-pip \
+            libncurses-dev libaio-dev libaio1 ccache
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          key: ${{ runner.os }}-build-amd-el9.x86_64-${{ hashFiles('deps/init/oceanbase.el9.x86_64.deps') }}
+          path: deps/3rd
+
+      - name: Build the stub cuVS bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcc -O2 -shared -fPIC -o "$HOME/libseekdb_cuvs_bridge.so" .github/ci/seekdb_cuvs_stub.c
+
+      - name: Build the candidate
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
+          export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+          export CCACHE_COMPILERCHECK=content
+          ccache --max-size=5G
+          {
+            ./build.sh release --init \
+              -DOB_BUILD_CUVS=ON \
+              -DOB_BUILD_CUVS_TRACE=OFF \
+              -DCUVS_BRIDGE_LIB="$HOME/libseekdb_cuvs_bridge.so" \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+            make -C build_release -j4
+          } 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          status=${PIPESTATUS[0]}
+          echo "build exit code: $status"
+          test -x build_release/src/observer/seekdb
+          exit $status
+
+      - name: Upload the build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: amd-build-log
+          path: build.log

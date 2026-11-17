@@ -31,6 +31,10 @@
 #include <cstdio>
 #include <cstring>
 #include <pthread.h>
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#endif
 #include "vsag/vsag.h"
 #include "vsag/errors.h"
 #include "vsag/dataset.h"
@@ -321,8 +325,34 @@ static bool ob_cuvs_try_search(void *key, vsag::Allocator *alloc,
 }
 
 static const char OB_CUVS_SNAPSHOT_MAGIC[8] = {'O', 'B', 'C', 'U', 'V', 'S', '0', '2'};
+
+// [hipVS/cuVS] The cuVS CAGRA snapshot is staged in a temporary file before it
+// is copied into the observer index stream.  The staged payload is the whole
+// GPU snapshot (dataset + graph, hundreds of MB), so keeping it on disk costs a
+// full write plus a full read of that payload inside the index build window.
+// An anonymous in-memory file (memfd) carries the same bytes through the same
+// "/proc/self/fd/<fd>" hand-off that cuVS's serializer needs, without touching
+// the filesystem.  tmpfile() stays as the fallback when memfd is unavailable.
+static FILE *ob_cuvs_open_snapshot_file()
+{
+  FILE *file = nullptr;
+#if defined(__linux__) && defined(MFD_CLOEXEC)
+  int fd = ::memfd_create("seekdb_cuvs_snapshot", MFD_CLOEXEC);
+  if (fd >= 0) {
+    file = ::fdopen(fd, "w+b");
+    if (file == nullptr) {
+      ::close(fd);
+    }
+  }
+#endif
+  if (file == nullptr) {
+    file = ::tmpfile();
+  }
+  return file;
+}
+
 struct ObCuvsSnapshotFile {
-  FILE *file_ = ::tmpfile();
+  FILE *file_ = ob_cuvs_open_snapshot_file();
   char path_[64] = {};
   ObCuvsSnapshotFile() {
     if (file_ != nullptr) {
@@ -429,7 +459,7 @@ static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
     LOG_WARN("[OBVSAG][cuVS] failed to write snapshot stream", K(ret), KP(key), K(n));
     return true;
   }
-  std::vector<char> chunk(65536);
+  std::vector<char> chunk(1024 * 1024);
   uint64_t remaining = graph_bytes;
   while (remaining > 0) {
     const size_t bytes = std::min<uint64_t>(remaining, chunk.size());
