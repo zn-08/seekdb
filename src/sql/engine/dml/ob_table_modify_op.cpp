@@ -627,6 +627,7 @@ ObTableModifyOp::ObTableModifyOp(ObExecContext &ctx,
     dml_modify_rows_(ctx.get_allocator()),
     last_store_row_(),
     ai_request_seq_(0),
+    ai_invalidation_sql_(),
     saved_session_(NULL)
 {
   obj_print_params_ = CREATE_OBJ_PRINT_PARAM(ctx_.get_my_session());
@@ -815,6 +816,7 @@ int ObTableModifyOp::inner_close()
     }
   }
   dml_modify_rows_.clear();
+  ai_invalidation_sql_.reset();
   return ret;
 }
 
@@ -1063,6 +1065,17 @@ static int ai_column_rowkey_predicate(ObEvalCtx &eval_ctx,
   return ret;
 }
 
+static int ai_column_append_hex(ObSqlString &sql, const ObString &value)
+{
+  int ret = sql.append("X'");
+  for (int64_t i = 0; OB_SUCC(ret) && i < value.length(); ++i) {
+    if (OB_FAIL(sql.append_fmt("%02X", static_cast<unsigned char>(value.ptr()[i])))) {
+    }
+  }
+  if (OB_SUCC(ret)) { ret = sql.append("'"); }
+  return ret;
+}
+
 static int ai_column_value_changed(ObEvalCtx &eval_ctx,
                                    const ObDMLBaseCtDef &ctdef,
                                    const uint64_t column_id,
@@ -1096,9 +1109,14 @@ int ObTableModifyOp::maintain_ai_column_tasks(const ObDMLBaseCtDef &ctdef,
   if (!ctdef.is_primary_index_) {
     return ret;
   }
+  const uint64_t table_id = ctdef.das_base_ctdef_.table_id_;
+  // Bootstrap writes core system tables before the complete schema guard exists.
+  // AI columns are only supported on user tables, so leave those writes alone.
+  if (is_system_table(table_id)) {
+    return ret;
+  }
   ObSchemaGetterGuard *guard = ctx_.get_sql_ctx()->schema_guard_;
   const ObTableSchema *table_schema = NULL;
-  const uint64_t table_id = ctdef.das_base_ctdef_.table_id_;
   bool has_ai_column = false;
   if (OB_ISNULL(guard)) {
     ret = OB_ERR_UNEXPECTED;
@@ -1201,6 +1219,44 @@ int ObTableModifyOp::maintain_ai_column_tasks(const ObDMLBaseCtDef &ctdef,
       }
     }
   }
+  if (OB_SUCC(ret) && !is_delete && !tasks.empty()) {
+    const ObDatabaseSchema *database_schema = NULL;
+    ObSqlString invalidation;
+    if (OB_FAIL(guard->get_database_schema(table_schema->get_database_id(),
+                                           database_schema))) {
+    } else if (OB_ISNULL(database_schema)) {
+      ret = OB_SCHEMA_ERROR;
+    } else if (OB_FAIL(invalidation.append_fmt(
+                   "UPDATE `%.*s`.`%.*s` SET ",
+                   database_schema->get_database_name_str().length(),
+                   database_schema->get_database_name_str().ptr(),
+                   table_schema->get_table_name_str().length(),
+                   table_schema->get_table_name_str().ptr()))) {
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < tasks.count(); ++i) {
+      const uint64_t result_id = tasks.at(i).column_id_;
+      const ObColumnSchemaV2 *result_column = table_schema->get_column_schema(result_id);
+      if (OB_ISNULL(result_column)) {
+        ret = OB_SCHEMA_ERROR;
+      } else if (OB_FAIL(invalidation.append_fmt(
+                     "%s`%.*s`=NULL, `__ai_state_%lu`=0, `__ai_request_%lu`=",
+                     i == 0 ? "" : ", ",
+                     result_column->get_column_name_str().length(),
+                     result_column->get_column_name_str().ptr(),
+                     static_cast<unsigned long>(result_id),
+                     static_cast<unsigned long>(result_id)))) {
+      } else if (OB_FAIL(ai_column_append_hex(invalidation, request_id.string()))) {
+      }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(invalidation.append_fmt(
+            " WHERE %.*s", rowkey_predicate.length(), rowkey_predicate.ptr()))) {
+    } else if (OB_SUCC(ret)) {
+      ObString copied_sql;
+      if (OB_FAIL(ob_write_string(ctx_.get_allocator(), invalidation.string(), copied_sql))) {
+      } else if (OB_FAIL(ai_invalidation_sql_.push_back(copied_sql))) {
+      }
+    }
+  }
   if (OB_SUCC(ret) && (is_delete || !tasks.empty())) {
     ObDMLSqlSplicer dml;
     ObSqlString sql;
@@ -1295,6 +1351,27 @@ int ObTableModifyOp::submit_all_dml_task()
       dml_rtctx_.reuse();
     }
   }
+  if (OB_SUCC(ret) && !ai_invalidation_sql_.empty()) {
+    ret = flush_ai_column_invalidations();
+  }
+  return ret;
+}
+
+int ObTableModifyOp::flush_ai_column_invalidations()
+{
+  int ret = OB_SUCCESS;
+  if (ai_invalidation_sql_.empty()) {
+  } else if (OB_FAIL(open_inner_conn())) {
+  } else if (OB_FAIL(begin_nested_session(false))) {
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < ai_invalidation_sql_.count(); ++i) {
+      if (OB_FAIL(execute_write(ai_invalidation_sql_.at(i).ptr()))) {
+      }
+    }
+    const int end_ret = end_nested_session();
+    if (OB_SUCC(ret) && OB_SUCCESS != end_ret) { ret = end_ret; }
+  }
+  ai_invalidation_sql_.reset();
   return ret;
 }
 

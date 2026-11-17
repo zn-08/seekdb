@@ -233,6 +233,7 @@ public:
   int execute_read(const char *sql, common::ObMySQLProxy::MySQLResult &res);
   int maintain_ai_column_tasks(const ObDMLBaseCtDef &ctdef,
                                const bool is_insert, const bool is_delete);
+  int flush_ai_column_invalidations();
   int check_stack();
   bool is_nested_session() { return ObSQLUtils::is_nested_sql(&ctx_); }
   bool is_fk_nested_session() { return ObSQLUtils::is_fk_nested_sql(&ctx_); }
@@ -316,6 +317,7 @@ public:
   ObSEArray<ObForeignKeyChecker *, 4> fk_checkers_;
   ObChunkDatumStore::ShadowStoredRow last_store_row_;
   uint64_t ai_request_seq_;
+  common::ObSEArray<common::ObString, 4> ai_invalidation_sql_;
 private:
   ObSQLSessionInfo::StmtSavedValue *saved_session_;
   char saved_session_buf_[sizeof(ObSQLSessionInfo::StmtSavedValue)] __attribute__((aligned (16)));;
