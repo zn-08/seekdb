@@ -546,8 +546,8 @@ int ObDDLOperator::create_user(ObUserInfo &user,
   return ret;
 }
 
-static int persist_ai_column_definitions(const ObTableSchema &table_schema,
-                                         ObMySQLTransaction &trans)
+int ObDDLOperator::persist_ai_column_definitions(const ObTableSchema &table_schema,
+                                                  ObMySQLTransaction &trans)
 {
   int ret = OB_SUCCESS;
   for (ObTableSchema::const_column_iterator it = table_schema.column_begin();
@@ -555,7 +555,7 @@ static int persist_ai_column_definitions(const ObTableSchema &table_schema,
     const ObColumnSchemaV2 *column = *it;
     if (OB_ISNULL(column)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (column->is_ai_column()) {
+    } else if (column->is_ai_column() && !column->get_ai_column_expr().empty()) {
       const char *suffixes[] = {"state", "request", "result_spec"};
       uint64_t hidden_ids[3] = {OB_INVALID_ID, OB_INVALID_ID, OB_INVALID_ID};
       for (int64_t j = 0; OB_SUCC(ret) && j < 3; ++j) {

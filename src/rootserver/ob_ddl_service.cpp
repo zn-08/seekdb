@@ -7831,6 +7831,36 @@ int ObDDLService::add_new_column_to_table_schema(
       }
     }
   }
+  if (OB_SUCC(ret) && alter_column_schema.is_ai_column()) {
+    const char *suffixes[] = {"state", "request", "result_spec"};
+    const uint64_t ai_column_id = alter_column_schema.get_column_id();
+    for (int64_t j = 0; OB_SUCC(ret) && j < 3; ++j) {
+      AlterColumnSchema hidden;
+      char name[128];
+      const int len = snprintf(name, sizeof(name), "__ai_%s_%lu", suffixes[j],
+                               static_cast<unsigned long>(ai_column_id));
+      if (len <= 0 || len >= static_cast<int>(sizeof(name))) {
+        ret = OB_INVALID_ARGUMENT;
+      } else {
+        hidden.alter_type_ = OB_DDL_ADD_COLUMN;
+        hidden.set_is_hidden(true);
+        hidden.set_nullable(true);
+        hidden.set_data_type(0 == j ? ObIntType : ObVarcharType);
+        if (j > 0) {
+          hidden.set_data_length(1 == j ? 128 : 2048);
+        }
+        if (OB_FAIL(hidden.set_column_name(name))) {
+        } else if (OB_FAIL(add_new_column_to_table_schema(origin_table_schema,
+                        alter_table_schema, tz_info_wrap, local_session_var,
+                        allocator, new_table_schema, hidden, gen_col_expr_arr,
+                        schema_guard, curr_udt_set_id, ddl_operator, trans))) {
+        }
+      }
+    }
+    if (OB_SUCC(ret) && update_inner_table &&
+        OB_FAIL(ddl_operator->persist_ai_column_definitions(new_table_schema, *trans))) {
+    }
+  }
   return ret;
 }
 

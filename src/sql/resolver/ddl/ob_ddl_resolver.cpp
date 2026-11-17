@@ -1762,6 +1762,22 @@ int ObDDLResolver::resolve_column_name(ObColumnSchemaV2 &column,
   return ret;
 }
 
+static bool ai_expr_references_column(const ParseNode *node, const ObString &column_name)
+{
+  bool found = false;
+  if (NULL != node) {
+    if (T_COLUMN_REF == node->type_ && node->num_child_ >= 3 &&
+        NULL != node->children_[2] && NULL != node->children_[2]->str_value_) {
+      const ObString ref(node->children_[2]->str_len_, node->children_[2]->str_value_);
+      found = 0 == ref.case_compare(column_name);
+    }
+    for (int64_t i = 0; !found && i < node->num_child_; ++i) {
+      found = ai_expr_references_column(node->children_[i], column_name);
+    }
+  }
+  return found;
+}
+
 int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
                                              ParseNode *node, /* column_definition */
                                              ObColumnResolveStat &resolve_stat,
@@ -1890,14 +1906,50 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
         column.add_column_flag(AI_COLUMN_FLAG);
       }
     }
-    for (int64_t i = 0; OB_SUCC(ret) && NULL != options_node && i < options_node->num_child_; ++i) {
-      const ParseNode *option = options_node->children_[i];
-      if (OB_ISNULL(option) || 2 != option->num_child_
-          || OB_ISNULL(option->children_[0]) || OB_ISNULL(option->children_[1])) {
+    if (OB_SUCC(ret)) {
+      const ParseNode *func_name = expr_node->type_ == T_FUN_SYS && expr_node->num_child_ >= 2
+                                   ? expr_node->children_[0] : NULL;
+      const bool is_embed = NULL != func_name && 8 == func_name->str_len_ &&
+                            0 == strncasecmp(func_name->str_value_, "AI_EMBED", 8);
+      const bool is_complete = NULL != func_name && 11 == func_name->str_len_ &&
+                               0 == strncasecmp(func_name->str_value_, "AI_COMPLETE", 11);
+      if ((!is_embed && !is_complete) || (column.is_collection() != is_embed)) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN expression or result type is");
+      } else if (is_embed) {
+        const ParseNode *args = expr_node->children_[1];
+        if (NULL == args || args->num_child_ < 2) {
+          ret = OB_INVALID_ARGUMENT;
+        } else if (args->num_child_ >= 3 && NULL != args->children_[2]) {
+          int64_t vector_dim = 0;
+          const int64_t requested_dim = args->children_[2]->value_;
+          if (OB_FAIL(ObVectorIndexUtil::get_vector_dim_from_extend_type_info(
+                  column.get_extended_type_info(), vector_dim))) {
+          } else if (vector_dim != requested_dim) {
+            ret = OB_ERR_INVALID_VECTOR_DIM;
+            LOG_USER_ERROR(OB_ERR_INVALID_VECTOR_DIM,
+                           static_cast<uint32_t>(vector_dim),
+                           static_cast<uint32_t>(requested_dim));
+          }
+        }
+      }
+    }
+    for (ObTableSchema::const_column_iterator it = table_schema.column_begin();
+         OB_SUCC(ret) && it != table_schema.column_end(); ++it) {
+      const ObColumnSchemaV2 *dependency = *it;
+      if (NULL != dependency && dependency->is_ai_column() &&
+          ai_expr_references_column(expr_node, dependency->get_column_name_str())) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN dependency on another AI COLUMN is");
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && NULL != options_node && i < options_node->num_child_; i += 2) {
+      if (i + 1 >= options_node->num_child_ ||
+          OB_ISNULL(options_node->children_[i]) || OB_ISNULL(options_node->children_[i + 1])) {
         ret = OB_INVALID_ARGUMENT;
       } else {
-        const ParseNode *name = option->children_[0];
-        const ParseNode *value = option->children_[1];
+        const ParseNode *name = options_node->children_[i];
+        const ParseNode *value = options_node->children_[i + 1];
         if (11 == name->str_len_ && 0 == strncasecmp(name->str_value_, "max_retries", 11)) {
           if (value->value_ < 0 || value->value_ > 100) {
             ret = OB_INVALID_ARGUMENT;

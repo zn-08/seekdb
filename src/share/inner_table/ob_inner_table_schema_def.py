@@ -2478,15 +2478,14 @@ def_table_schema(
     table_type = 'SYSTEM_TABLE',
     gm_columns = ['gmt_create', 'gmt_modified'],
     rowkey_columns = [
-        ('task_id', 'int')
+        ('table_id', 'int'),
+        ('column_id', 'int'),
+        ('request_id', 'varchar:128')
     ],
     is_cluster_private = False,
     meta_record_in_sys = False,
     normal_columns = [
-        ('table_id', 'int', 'false'),
-        ('column_id', 'int', 'false'),
         ('rowkey_predicate', 'varchar:2048', 'false'),
-        ('request_id', 'varchar:128', 'false'),
         ('definition_version', 'int', 'false'),
         ('status', 'varchar:16', 'false'),
         ('attempts', 'int', 'false'),
