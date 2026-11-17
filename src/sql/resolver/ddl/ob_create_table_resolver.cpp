@@ -842,6 +842,35 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
             if (OB_FAIL(stats.push_back(stat))) {
             }
           }
+          if (OB_SUCC(ret) && column.is_ai_column()) {
+            // Each result has independent durable state, request and result-spec
+            // slots. Keep the hidden columns in the same schema transaction.
+            const char *suffixes[] = {"state", "request", "result_spec"};
+            const uint64_t ai_column_id = column.get_column_id();
+            for (int64_t j = 0; OB_SUCC(ret) && j < 3; ++j) {
+              ObColumnSchemaV2 hidden;
+              char hidden_name[128];
+              const int name_len = snprintf(hidden_name, sizeof(hidden_name),
+                                            "__ai_%s_%lu", suffixes[j],
+                                            static_cast<unsigned long>(ai_column_id));
+              if (name_len <= 0 || name_len >= static_cast<int>(sizeof(hidden_name))) {
+                ret = OB_INVALID_ARGUMENT;
+              } else {
+                hidden.set_column_id(gen_column_id());
+                hidden.set_is_hidden(true);
+                hidden.set_nullable(true);
+                hidden.set_data_type(0 == j ? ObIntType : ObVarcharType);
+                if (j > 0) {
+                  hidden.set_data_length(1 == j ? 128 : 2048);
+                  hidden.set_charset_type(table_schema.get_charset_type());
+                  hidden.set_collation_type(table_schema.get_collation_type());
+                }
+                if (OB_FAIL(hidden.set_column_name(hidden_name))) {
+                } else if (OB_FAIL(resolved_cols.push_back(hidden))) {
+                }
+              }
+            }
+          }
         }
       } else if (T_PRIMARY_KEY == element->type_) {
         if (primary_key_set_in_heap_table) {

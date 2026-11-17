@@ -32,6 +32,8 @@
 #include "share/schema/ob_routine_sql_service.h"
 #include "share/schema/ob_sys_variable_sql_service.h"
 #include "share/schema/ob_table_sql_service.h"
+#include "share/ob_dml_sql_splicer.h"
+#include "share/inner_table/ob_inner_table_schema.h"
 #include "share/schema/ob_user_sql_service.h"
 #include "sql/optimizer/stat/ob_dbms_stats_maintenance_window.h"
 #include "pl/pl_cache/ob_pl_cache_mgr.h"
@@ -544,6 +546,64 @@ int ObDDLOperator::create_user(ObUserInfo &user,
   return ret;
 }
 
+static int persist_ai_column_definitions(const ObTableSchema &table_schema,
+                                         ObMySQLTransaction &trans)
+{
+  int ret = OB_SUCCESS;
+  for (ObTableSchema::const_column_iterator it = table_schema.column_begin();
+       OB_SUCC(ret) && it != table_schema.column_end(); ++it) {
+    const ObColumnSchemaV2 *column = *it;
+    if (OB_ISNULL(column)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (column->is_ai_column()) {
+      const char *suffixes[] = {"state", "request", "result_spec"};
+      uint64_t hidden_ids[3] = {OB_INVALID_ID, OB_INVALID_ID, OB_INVALID_ID};
+      for (int64_t j = 0; OB_SUCC(ret) && j < 3; ++j) {
+        char name[128];
+        const int len = snprintf(name, sizeof(name), "__ai_%s_%lu", suffixes[j],
+                                 static_cast<unsigned long>(column->get_column_id()));
+        const ObColumnSchemaV2 *hidden = len > 0 && len < static_cast<int>(sizeof(name))
+                                         ? table_schema.get_column_schema(name) : NULL;
+        if (OB_ISNULL(hidden) || !hidden->is_hidden()) {
+          ret = OB_ERR_UNEXPECTED;
+        } else {
+          hidden_ids[j] = hidden->get_column_id();
+        }
+      }
+      if (OB_SUCC(ret)) {
+        ObDMLSqlSplicer dml;
+        ObSqlString sql;
+        ObSqlString normalized_expr;
+        int64_t affected_rows = 0;
+        const ObString &expr = column->get_ai_column_expr();
+        if (column->is_json()) {
+          ret = normalized_expr.assign_fmt("%.*s Return exactly one valid JSON value",
+                                           expr.length(), expr.ptr());
+        } else {
+          ret = normalized_expr.assign_fmt("%.*s", expr.length(), expr.ptr());
+        }
+        if (OB_SUCC(ret) && OB_FAIL(dml.add_pk_column("table_id", table_schema.get_table_id()))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(dml.add_pk_column("column_id", column->get_column_id()))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("column_name", ObHexEscapeSqlStr(column->get_column_name_str())))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("state_column_id", hidden_ids[0]))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("request_column_id", hidden_ids[1]))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("result_spec_column_id", hidden_ids[2]))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("normalized_expr", ObHexEscapeSqlStr(ObString::make_string(normalized_expr.ptr()))))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("dependency_column_ids", ObHexEscapeSqlStr(ObString::make_string(""))))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("sync_mode", ObHexEscapeSqlStr(ObString::make_string("async"))))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("max_retries", column->get_ai_column_max_retries()))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(dml.add_column("definition_version", table_schema.get_schema_version()))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(dml.splice_insert_sql(OB_ALL_AI_COLUMN_TNAME, sql))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(trans.write(sql.ptr(), affected_rows))) {
+        } else if (OB_SUCC(ret) && 1 != affected_rows) {
+          ret = OB_ERR_UNEXPECTED;
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObDDLOperator::create_table(ObTableSchema &table_schema,
                                 ObMySQLTransaction &trans,
                                 const ObString *ddl_stmt_str/*=NULL*/,
@@ -568,6 +628,7 @@ int ObDDLOperator::create_table(ObTableSchema &table_schema,
         ddl_stmt_str,
         need_sync_schema_version,
         is_truncate_table))) {
+    } else if (OB_FAIL(persist_ai_column_definitions(table_schema, trans))) {
     } else if (OB_FAIL(sync_version_for_cascade_table(table_schema.get_depend_table_ids(), trans))) {
     } else if (OB_FAIL(sync_version_for_cascade_mock_fk_parent_table(table_schema.get_depend_mock_fk_parent_table_ids(), trans))) {
     }

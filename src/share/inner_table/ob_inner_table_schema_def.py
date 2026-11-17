@@ -2446,6 +2446,54 @@ all_ai_model_endpoint_def = dict(
 )
 def_table_schema(**all_ai_model_endpoint_def)
 
+def_table_schema(
+    owner = 'seekdb-ai-column',
+    table_name = '__all_ai_column',
+    table_id = '1131',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+        ('table_id', 'int'),
+        ('column_id', 'int')
+    ],
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('column_name', 'varchar:128', 'false'),
+        ('state_column_id', 'int', 'false'),
+        ('request_column_id', 'int', 'false'),
+        ('result_spec_column_id', 'int', 'false'),
+        ('normalized_expr', 'varchar:4096', 'false'),
+        ('dependency_column_ids', 'varchar:2048', 'false'),
+        ('sync_mode', 'varchar:16', 'false'),
+        ('max_retries', 'int', 'false'),
+        ('definition_version', 'int', 'false')
+    ]
+)
+
+def_table_schema(
+    owner = 'seekdb-ai-column',
+    table_name = '__all_ai_column_task',
+    table_id = '1132',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+        ('task_id', 'int')
+    ],
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('table_id', 'int', 'false'),
+        ('column_id', 'int', 'false'),
+        ('rowkey_predicate', 'varchar:2048', 'false'),
+        ('request_id', 'varchar:128', 'false'),
+        ('definition_version', 'int', 'false'),
+        ('status', 'varchar:16', 'false'),
+        ('attempts', 'int', 'false'),
+        ('eligible_ts', 'timestamp', 'false')
+    ]
+)
+
 
 all_objauth_mysql_def = dict(
     owner = 'cjl476581',

@@ -1875,6 +1875,48 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
       }
     }
   }
+  if (OB_SUCC(ret) && 1 == node->value_) {
+    // AI columns are stored result columns. The expression is a DDL payload and
+    // must never be evaluated in the user's INSERT or UPDATE transaction.
+    const ParseNode *expr_node = node->num_child_ > 4 ? node->children_[4] : NULL;
+    const ParseNode *options_node = node->num_child_ > 5 ? node->children_[5] : NULL;
+    int64_t max_retries = 3;
+    if (OB_ISNULL(expr_node) || OB_ISNULL(expr_node->str_value_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      const ObString expr_str(expr_node->str_len_, expr_node->str_value_);
+      if (OB_FAIL(column.set_ai_column_expr(expr_str))) {
+      } else {
+        column.add_column_flag(AI_COLUMN_FLAG);
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && NULL != options_node && i < options_node->num_child_; ++i) {
+      const ParseNode *option = options_node->children_[i];
+      if (OB_ISNULL(option) || 2 != option->num_child_
+          || OB_ISNULL(option->children_[0]) || OB_ISNULL(option->children_[1])) {
+        ret = OB_INVALID_ARGUMENT;
+      } else {
+        const ParseNode *name = option->children_[0];
+        const ParseNode *value = option->children_[1];
+        if (11 == name->str_len_ && 0 == strncasecmp(name->str_value_, "max_retries", 11)) {
+          if (value->value_ < 0 || value->value_ > 100) {
+            ret = OB_INVALID_ARGUMENT;
+          } else {
+            max_retries = value->value_;
+          }
+        } else if (9 == name->str_len_ && 0 == strncasecmp(name->str_value_, "sync_mode", 9)) {
+          if (5 != value->str_len_ || 0 != strncasecmp(value->str_value_, "async", 5)) {
+            ret = OB_NOT_SUPPORTED;
+          }
+        } else {
+          ret = OB_INVALID_ARGUMENT;
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      column.set_ai_column_max_retries(max_retries);
+    }
+  }
   if (OB_SUCC(ret) && GEN_COLUMN_DEFINITION_NUM_CHILD == node->num_child_) {
     ParseNode *expr_node = NULL;
     if (OB_ISNULL(expr_node = node->children_[3])) {
