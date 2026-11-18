@@ -556,7 +556,18 @@ int ObDDLOperator::persist_ai_column_definitions(const ObTableSchema &table_sche
     const ObColumnSchemaV2 *column = *it;
     if (OB_ISNULL(column)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (column->is_ai_column() && !column->get_ai_column_expr().empty()) {
+    } else if (table_schema.is_user_table()) {
+      LOG_INFO("AI column definition scan", "table_id", table_schema.get_table_id(),
+               "column_name", column->get_column_name_str(),
+               "is_ai", column->is_ai_column(),
+               "expr_len", column->get_ai_column_expr().length());
+    }
+    if (OB_SUCC(ret) && NULL != column && column->is_ai_column() &&
+        !column->get_ai_column_expr().empty()) {
+      LOG_INFO("persisting AI column definition", "table_id", table_schema.get_table_id(),
+               "column_id", column->get_column_id(),
+               "column_name", column->get_column_name_str(),
+               "expr_len", column->get_ai_column_expr().length());
       const char *suffixes[] = {"state", "request", "result_spec"};
       uint64_t hidden_ids[3] = {OB_INVALID_ID, OB_INVALID_ID, OB_INVALID_ID};
       for (int64_t j = 0; OB_SUCC(ret) && j < 3; ++j) {
