@@ -20,6 +20,7 @@
 #include "rootserver/ob_lob_meta_builder.h"
 #include "rootserver/ob_lob_piece_builder.h"
 #include "rootserver/ob_table_creator.h"
+#include "rootserver/ob_ddl_operator.h"
 #include "rootserver/freeze/ob_major_freeze_helper.h"
 #include "share/ob_rpc_struct.h"
 #include "share/ob_debug_sync_point.h"
@@ -210,6 +211,14 @@ int ObTableHelper::create_tables_(const ObString *ddl_stmt_str)
                 get_trans_(),
                 ddl_stmt_str,
                 true/*sync_schema_version_for_last_table*/))) {
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < new_tables_.count(); ++i) {
+        if (OB_FAIL(ObDDLOperator::persist_ai_column_definitions(new_tables_.at(i),
+                                                                  get_trans_()))) {
+          LOG_WARN("failed to persist AI column definitions during parallel table creation",
+                   KR(ret), "table_id", new_tables_.at(i).get_table_id());
+        }
+      }
     }
   }
   return ret;

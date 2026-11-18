@@ -139,7 +139,8 @@ jobs:
           set +e
           status=0
           for test_name in ai_column_ddl ai_column_t1_dml ai_column_worker ai_column_vector_index ai_column_retry_strict; do
-            "$CLIENT_ROOT/bin/mysqltest" \
+            timeout --signal=TERM --kill-after=10s 180s \
+              "$CLIENT_ROOT/bin/mysqltest" \
               --host=127.0.0.1 \
               --port="$SEEKDB_PORT" \
               --user=root \
